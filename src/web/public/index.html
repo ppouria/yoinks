@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>yoinks — paste. yoink. done.</title>
+    <meta name="description" content="Download videos from YouTube, X, Instagram, Threads, TikTok and 1,800+ other sites." />
+    <meta name="theme-color" content="#0c0c0d" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230c0c0d'/%3E%3Cpath d='M16 8v11m0 0-4.5-4.5M16 19l4.5-4.5M10 23h12' stroke='%23f5f5f0' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E" />
+    <link rel="preload" href="/styles.css" as="style" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <pre class="logo" aria-label="yoinks" aria-hidden="true">
+ ▄█▄ ▄█▄ ▄█▄ ▄█▄ ▄█▄ ▄█▄ ▄█▄
+</pre>
+        <p class="tagline">yoink any video. <span class="dim">paste. yoink. done.</span></p>
+      </header>
+
+      <section class="stage" id="stage">
+        <!-- 1. paste -->
+        <form class="panel" id="paste-form" novalidate>
+          <label class="panel-title" for="url">Paste a link</label>
+          <div class="field">
+            <input
+              id="url"
+              name="url"
+              type="url"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="https://youtube.com/watch?v=…"
+              aria-describedby="paste-hint"
+            />
+            <button class="btn btn-primary" id="probe-btn" type="submit">yoink</button>
+          </div>
+          <p class="hint" id="paste-hint">youtube · x · instagram · threads · tiktok · +1800 more</p>
+          <p class="error" id="paste-error" role="alert" hidden></p>
+        </form>
+
+        <!-- 2. pick -->
+        <section class="panel" id="pick-panel" hidden aria-live="polite">
+          <div class="media">
+            <img class="thumb" id="thumb" alt="" width="160" height="90" loading="lazy" decoding="async" hidden />
+            <div class="media-copy">
+              <h1 class="title" id="video-title"></h1>
+              <p class="meta" id="video-meta"></p>
+            </div>
+          </div>
+          <div class="formats" id="formats" role="radiogroup" aria-label="Download format"></div>
+          <button class="btn btn-ghost" id="back-btn" type="button">← paste another link</button>
+        </section>
+
+        <!-- 3. progress -->
+        <section class="panel" id="progress-panel" hidden aria-live="polite">
+          <p class="eyebrow" id="progress-title"></p>
+          <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar">
+            <div class="bar-fill" id="bar-fill"></div>
+          </div>
+          <dl class="stats">
+            <div><dt>progress</dt><dd id="stat-percent">0%</dd></div>
+            <div><dt>size</dt><dd id="stat-size">—</dd></div>
+            <div><dt>speed</dt><dd id="stat-speed">—</dd></div>
+            <div><dt>eta</dt><dd id="stat-eta">—</dd></div>
+          </dl>
+          <div class="progress-actions">
+            <button class="btn btn-ghost" id="cancel-btn" type="button">cancel</button>
+          </div>
+        </section>
+
+        <!-- 4. done -->
+        <section class="panel" id="done-panel" hidden>
+          <p class="eyebrow">✓ yoinked</p>
+          <h1 class="title" id="done-title"></h1>
+          <p class="meta" id="done-meta"></p>
+          <div class="progress-actions">
+            <button class="btn btn-primary" id="save-btn" type="button">save file</button>
+            <button class="btn btn-ghost" id="again-btn" type="button">yoink another</button>
+          </div>
+        </section>
+
+        <!-- 5. error -->
+        <section class="panel" id="error-panel" hidden role="alert">
+          <p class="eyebrow error-eyebrow">✗ that didn’t yoink</p>
+          <p class="error" id="error-message"></p>
+          <div class="progress-actions">
+            <button class="btn btn-ghost" id="error-back-btn" type="button">try another link</button>
+          </div>
+        </section>
+      </section>
+
+      <footer class="footer">
+        <span id="engine-status" class="dim">powered by yt-dlp</span>
+        <a class="dim" href="https://github.com/pablostanley/yoinks" rel="noopener noreferrer" target="_blank">yoinks</a>
+      </footer>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

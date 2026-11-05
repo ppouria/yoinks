@@ -187,7 +187,7 @@ function AppContent({
       ytdlpRef.current = ytdlp
       if (controller.signal.aborted) return
       setPhase({name: 'probing', status: 'fetching video info…'})
-      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, controller.signal)
+      const {info: videoInfo, infoJsonPath} = await probe(ytdlp, targetUrl, {signal: controller.signal})
       if (controller.signal.aborted) return
       infoJsonRef.current = infoJsonPath
       setInfo(videoInfo)

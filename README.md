@@ -85,6 +85,82 @@ To try it as a global command without publishing: `npm link`, then run
 - [x] Publish to npm (`npm i -g yoinks` / `npx yoinks`)
 - [ ] `curl yoinks.sh | sh` installer
 
+## Web app
+
+This fork adds a small HTTP server + web UI (`src/web/`) that reuses the same
+`src/lib/ytdlp.ts` probe/download plumbing as the TUI. Paste a link, pick a
+format, get the file. No framework, no build step beyond the server bundle.
+
+```sh
+npm run build
+PORT=3000 npm run web      # http://127.0.0.1:3000
+```
+
+Run locally it uses your own `yt-dlp`/`ffmpeg`, so it behaves like the CLI.
+It listens only on `HOST` (default `127.0.0.1`) — put it behind a proxy or a
+panel that terminates TLS.
+
+### API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/info` | `{url}` → title, uploader, thumbnail, `choices[]` |
+| `POST` | `/api/download` | `{url, choice}` → `{job}` (the job starts immediately) |
+| `GET` | `/api/jobs/:id` | progress: `status`, `bytesOnDisk`, `totalBytes`, `speed`, `eta` |
+| `DELETE` | `/api/jobs/:id` | cancel and delete the partial file |
+| `GET` | `/api/jobs/:id/file` | stream the finished file (supports `Range`) |
+| `GET` | `/healthz` | `{ok, ytdlp, active}` |
+
+A download never blocks a request: the client polls the job. Finished files
+are served from disk and deleted an hour after they complete.
+
+### Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `HOST` / `PORT` | `127.0.0.1` / `3000` | listen address |
+| `YOINKS_WORK_DIR` | `./downloads` | where finished/in-progress files live |
+| `YOINKS_DIR_BUDGET_BYTES` | 8 GiB | refuse new downloads past this |
+| `YOINKS_FILE_TTL_MS` | 1 hour | how long a finished file survives |
+| `YOINKS_MAX_ACTIVE` | 2 | concurrent downloads |
+| `YOINKS_PROBE_TIMEOUT_MS` | 90 s | probe timeout |
+| `YOINKS_COOKIES_FILE` | — | Netscape `cookies.txt` for sites that need a session |
+
+### A note on YouTube from a server
+
+YouTube applies an **IP-level** bot check. From a home connection the web app
+works like the CLI; from a datacenter/VPS IP most YouTube links fail with
+*"Sign in to confirm you're not a bot"* while every other site keeps working.
+That is YouTube's decision, not something the app can fix — PO tokens, WARP,
+IPv6 and client spoofing were all tested and none of them get past it.
+If you need YouTube on a server, point `YOINKS_COOKIES_FILE` at a
+`cookies.txt` exported from a **logged-in** browser session:
+
+```sh
+# export with the "Get cookies.txt LOCALLY" extension while signed in,
+# then:
+YOINKS_COOKIES_FILE=/etc/yoinks/cookies.txt npm run web
+```
+
+Treat that file like a password. A shared/throwaway account is safer than
+your main one.
+
+## Deploying as a Rebecca external app
+
+The server runs unmodified as a Node.js external app (`HOST`/`PORT` come from
+the panel's unit). Package the built output with the entry at the archive root:
+
+```sh
+npm run build
+mkdir -p /tmp/pkg && cp -r dist/web/. /tmp/pkg/
+cp /tmp/pkg/server.js /tmp/pkg/ ; # entry must be server.js at the root
+(cd /tmp/pkg && zip -qr ../downloader.zip .)
+```
+
+Then install it with a `package.json` whose `start` script runs `node server.js`.
+Set `YOINKS_WORK_DIR` to a path inside the app directory — the panel runs
+external apps with a private, ephemeral `/tmp`.
+
 ## A note on fair use
 
 yoinks is a personal-archiving tool. Downloading content may violate a

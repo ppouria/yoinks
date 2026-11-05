@@ -75,15 +75,6 @@ export async function findFfmpeg(): Promise<string | undefined> {
   return undefined
 }
 
-export type VideoInfo = {
-  title: string
-  uploader?: string
-  duration?: number
-  webpage_url?: string
-  extractor_key?: string
-  formats?: RawFormat[]
-}
-
 type RawFormat = {
   format_id: string
   ext?: string
@@ -97,15 +88,45 @@ type RawFormat = {
   filesize_approx?: number
 }
 
-export type ProbeResult = {
-  info: VideoInfo
-  /** Raw -J output saved to disk so downloads can skip re-extraction via --load-info-json. */
-  infoJsonPath: string
+export type VideoInfo = {
+  title: string
+  uploader?: string
+  duration?: number
+  thumbnail?: string
+  webpage_url?: string
+  extractor_key?: string
+  formats?: RawFormat[]
 }
 
-export async function probe(ytdlp: string, url: string, signal?: AbortSignal): Promise<ProbeResult> {
+export type ProbeResult = {
+  info: VideoInfo
+  /**
+   * Raw -J output saved to disk so downloads can skip re-extraction via
+   * --load-info-json. Undefined when the caller asked to skip it.
+   */
+  infoJsonPath?: string
+}
+
+export type ProbeOptions = {
+  /** Cancels the yt-dlp child process. */
+  signal?: AbortSignal
+  cookiesFile?: string
+  /**
+   * Persist the raw -J output for --load-info-json. The TUI wants it (it makes
+   * the following download start instantly); the web server re-probes anyway,
+   * so it skips the write and keeps nothing behind on disk.
+   */
+  saveInfo?: boolean
+}
+
+export async function probe(ytdlp: string, url: string, options: ProbeOptions = {}): Promise<ProbeResult> {
+  const {cookiesFile, saveInfo = true, signal} = options
   const stdout = await new Promise<string>((resolve, reject) => {
-    const child = spawn(ytdlp, ['-J', '--no-playlist', '--no-warnings', url], {signal})
+    const child = spawn(
+      ytdlp,
+      ['-J', '--no-playlist', '--no-warnings', ...(cookiesFile ? ['--cookies', cookiesFile] : []), url],
+      {signal},
+    )
     let out = ''
     let stderr = ''
     child.stdout.on('data', chunk => (out += chunk))
@@ -127,6 +148,7 @@ export async function probe(ytdlp: string, url: string, signal?: AbortSignal): P
     throw new Error('Could not parse video info from yt-dlp.')
   }
 
+  if (!saveInfo) return {info}
   const infoJsonPath = path.join(os.tmpdir(), `yoinks-info-${process.pid}-${Date.now()}.json`)
   await fs.writeFile(infoJsonPath, stdout)
   return {info, infoJsonPath}
@@ -146,7 +168,11 @@ export function buildChoices(info: VideoInfo): DownloadChoice[] {
 
   const audioOnly = formats.filter(f => f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none'))
   const bestAudio = [...audioOnly].sort((a, b) => (b.abr ?? b.tbr ?? 0) - (a.abr ?? a.tbr ?? 0))[0]
-  const audioSize = bestAudio?.filesize ?? bestAudio?.filesize_approx
+  // Sizes are only worth showing when they're the *exact* stream size. A
+  // filesize_approx for an HLS/adaptive stream is frequently wrong by more
+  // than 30%, and showing a precise-looking "~3.3 MB" for a 4.9 MB file is
+  // worse than showing nothing.
+  const exact = (format: RawFormat | undefined): number | undefined => format?.filesize
 
   const videos = formats.filter(f => f.vcodec && f.vcodec !== 'none' && f.height)
   const heights = [...new Set(videos.map(f => f.height as number))].sort((a, b) => b - a)
@@ -155,8 +181,10 @@ export function buildChoices(info: VideoInfo): DownloadChoice[] {
     const candidates = videos.filter(f => f.height === height)
     const best = [...candidates].sort((a, b) => scoreVideo(b) - scoreVideo(a))[0]
     const muxed = best.acodec && best.acodec !== 'none'
-    const size = (best.filesize ?? best.filesize_approx ?? 0) + (muxed ? 0 : audioSize ?? 0)
-    const sizeLabel = size > 0 ? ` · ~${formatBytes(size)}` : ''
+    const videoSize = exact(best)
+    const mergeSize = muxed ? 0 : (exact(bestAudio) ?? 0)
+    const size = videoSize !== undefined ? videoSize + mergeSize : undefined
+    const sizeLabel = size ? ` · ~${formatBytes(size)}` : ''
     choices.push({
       kind: 'video',
       label: `${height}p · mp4${sizeLabel}`,
@@ -177,7 +205,7 @@ export function buildChoices(info: VideoInfo): DownloadChoice[] {
     })
   }
 
-  const audioSizeLabel = audioSize ? ` · ~${formatBytes(audioSize)}` : ''
+  const audioSizeLabel = exact(bestAudio) ? ` · ~${formatBytes(exact(bestAudio)!)}` : ''
   choices.push({
     kind: 'audio',
     label: `audio only · mp3${audioSizeLabel}`,
@@ -222,6 +250,14 @@ export function download(
     url: string
     /** When set, reuse the probe's metadata instead of re-extracting — starts much faster. */
     infoJsonPath?: string
+    /** Netscape cookies.txt. Only needed for sites that demand a session (YouTube from datacenter IPs). */
+    cookiesFile?: string
+    /**
+     * Filename template passed to `-o`. Defaults to the TUI's 60-char slice,
+     * which keeps its narrow frame readable; the web UI shows the saved name,
+     * so it uses the full video title instead.
+     */
+    filenameTemplate?: string
     choice: DownloadChoice
     outDir: string
   },
@@ -244,9 +280,10 @@ export function download(
     'after_move:filepath',
     '--no-simulate',
     '-o',
-    path.join(opts.outDir, '%(title).60s.%(ext)s'),
+    path.join(opts.outDir, opts.filenameTemplate ?? '%(title).60s.%(ext)s'),
   ]
   if (opts.ffmpegLocation) args.push('--ffmpeg-location', opts.ffmpegLocation)
+  if (opts.cookiesFile) args.push('--cookies', opts.cookiesFile)
 
   return new Promise((resolve, reject) => {
     const child = spawn(opts.ytdlp, args, {signal})
