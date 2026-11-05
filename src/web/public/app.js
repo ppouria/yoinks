@@ -241,6 +241,19 @@ $('error-back-btn').addEventListener('click', () => {
 
 let sessionsLoaded = false
 
+/** Domain to synthesise when the pasted data has no domain of its own. */
+const SITE_DOMAIN = {
+  youtube: '.youtube.com',
+  x: '.x.com',
+  instagram: '.instagram.com',
+  tiktok: '.tiktok.com',
+  reddit: '.reddit.com',
+  vimeo: '.vimeo.com',
+  facebook: '.facebook.com',
+  twitch: '.twitch.tv',
+  threads: '.threads.net',
+}
+
 async function loadSessions() {
   const data = await api('/api/cookies')
   const stored = new Map(data.stored.map(entry => [entry.key, entry]))
@@ -319,27 +332,116 @@ async function openSessions() {
 $('sessions-open').addEventListener('click', openSessions)
 $('sessions-back').addEventListener('click', () => show('paste'))
 
-$('cookie-upload').addEventListener('click', async () => {
-  const input = $('cookie-file')
+function selectTab(which) {
+  const paste = which === 'paste'
+  $('tab-paste').classList.toggle('active', paste)
+  $('tab-file').classList.toggle('active', !paste)
+  $('tab-paste').setAttribute('aria-selected', String(paste))
+  $('tab-file').setAttribute('aria-selected', String(!paste))
+  $('pane-paste').hidden = !paste
+  $('pane-file').hidden = paste
+}
+
+$('tab-paste').addEventListener('click', () => selectTab('paste'))
+$('tab-file').addEventListener('click', () => selectTab('file'))
+
+/**
+ * The extension offers JSON, Header String and Netscape. Only Netscape is what
+ * yt-dlp reads, but a user pasting the other two (or the raw "name=value; …"
+ * header) should still get a working session rather than a dead end.
+ */
+function normalisePastedCookies(text, hostHint) {
+  const trimmed = text.trim()
+  if (!trimmed) return ''
+
+  if (trimmed.startsWith('# Netscape HTTP Cookie File')) return trimmed
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed.cookies) ? parsed.cookies : null
+      if (list) {
+        const lines = list
+          .filter(c => c && c.name)
+          .map(c => {
+            const domain = c.domain || hostHint || ''
+            const hostOnly = !String(domain).startsWith('.')
+            const expires = c.expirationDate ? Math.floor(c.expirationDate) : Math.floor(Date.now() / 1000) + 86400 * 180
+            return [domain, hostOnly ? 'FALSE' : 'TRUE', c.path || '/', 'TRUE', expires, c.name, c.value ?? ''].join('\t')
+          })
+        if (lines.length) return ['# Netscape HTTP Cookie File', ...lines].join('\n')
+      }
+    } catch {
+      // not JSON after all
+    }
+  }
+
+  // Cookie header string: "auth_token=…; ct0=…"
+  if (trimmed.includes('=') && !trimmed.includes('\t')) {
+    const host = hostHint || '.x.com'
+    const lines = trimmed
+      .split(';')
+      .map(pair => pair.trim())
+      .filter(Boolean)
+      .map(pair => {
+        const index = pair.indexOf('=')
+        if (index < 1) return null
+        const name = pair.slice(0, index).trim()
+        const value = pair.slice(index + 1).trim()
+        const expires = Math.floor(Date.now() / 1000) + 86400 * 180
+        return [host.startsWith('.') ? host : `.${host}`, 'TRUE', '/', 'TRUE', expires, name, value].join('\t')
+      })
+      .filter(Boolean)
+    if (lines.length) return ['# Netscape HTTP Cookie File', ...lines].join('\n')
+  }
+
+  return trimmed
+}
+
+// A long paste leaves the caret at the end; scroll back so the user can see
+// that the "# Netscape HTTP Cookie File" line is really there.
+$('cookie-text').addEventListener('input', event => {
+  if (event.target.selectionStart === event.target.value.length) event.target.scrollTop = 0
+})
+
+$('cookie-save').addEventListener('click', async () => {
   const err = $('cookie-error')
   err.hidden = true
-  const file = input.files && input.files[0]
-  if (!file) {
-    err.textContent = 'Choose a cookies.txt file first.'
+  const site = $('cookie-site').value
+  const usingPaste = !$('pane-paste').hidden
+
+  let text = ''
+  if (usingPaste) {
+    text = $('cookie-text').value
+  } else {
+    const file = $('cookie-file').files && $('cookie-file').files[0]
+    if (!file) {
+      err.textContent = 'Choose a cookies.txt file first, or switch to paste.'
+      err.hidden = false
+      return
+    }
+    text = await file.text()
+  }
+
+  if (!text.trim()) {
+    err.textContent = usingPaste ? 'Paste the exported cookies first.' : 'That file is empty.'
     err.hidden = false
     return
   }
-  const button = $('cookie-upload')
+
+  text = normalisePastedCookies(text, SITE_DOMAIN[site] || null)
+
+  const button = $('cookie-save')
   button.disabled = true
   try {
-    const text = await file.text()
-    await api(`/api/cookies/${$('cookie-site').value}`, {
+    await api(`/api/cookies/${site}`, {
       method: 'PUT',
       headers: {'content-type': 'text/plain'},
       body: text,
     })
-    input.value = ''
+    $('cookie-text').value = ''
+    $('cookie-file').value = ''
     await loadSessions()
+    $('cookie-note').textContent = 'Saved on this server — it will be used from every device.'
   } catch (error) {
     err.textContent = error.message
     err.hidden = false

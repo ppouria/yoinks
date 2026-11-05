@@ -122,7 +122,13 @@ IP-level bot check to datacenter hosts. yt-dlp never logs in on our behalf; it
 reads a Netscape `cookies.txt`, so "signing in" here means exporting one from a
 browser that is already logged in.
 
-Open **signed-in sites** in the footer, pick the platform, and upload the file.
+Open **signed-in sites** in the footer, pick the platform, and either paste the
+exported cookies or upload the file. Paste accepts the Cookie-Editor **Netscape**
+export, a Chrome DevTools **JSON** export, and a raw `name=value; name=value`
+header string — the other two are converted on the client before upload.
+
+Jars live on the server, not in the browser, so a session saved from one device
+is used by every device that opens this page.
 Each platform gets its own jar, and a jar is only ever handed to yt-dlp for URLs
 belonging to that platform — X's `auth_token` is never offered to `youtube.com`.
 

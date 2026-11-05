@@ -105,10 +105,39 @@
           </details>
           <div class="cookie-form">
             <select id="cookie-site" aria-label="Site"></select>
+          </div>
+
+          <div class="cookie-tabs" role="tablist">
+            <button class="tab active" id="tab-paste" role="tab" type="button" aria-selected="true">paste</button>
+            <button class="tab" id="tab-file" role="tab" type="button" aria-selected="false">upload file</button>
+          </div>
+
+          <div id="pane-paste">
+            <textarea
+              id="cookie-text"
+              class="cookie-text"
+              spellcheck="false"
+              dir="ltr"
+              placeholder="# Netscape HTTP Cookie File&#10;.x.com&#9;TRUE&#9;/&#9;TRUE&#9;1830000000&#9;auth_token&#9;…"
+              aria-label="Paste cookies here"
+            ></textarea>
+            <p class="hint">
+              In the Cookie-Editor extension choose <strong>Export → Netscape</strong>, copy it, and paste the whole
+              text here. Browser “Copy cookies” from DevTools → Network → cookies also works.
+            </p>
+          </div>
+
+          <div id="pane-file" hidden>
             <input id="cookie-file" type="file" accept=".txt,text/plain" aria-label="cookies.txt" />
-            <button class="btn btn-primary btn-sm" id="cookie-upload" type="button">save</button>
+          </div>
+
+          <div class="cookie-form">
+            <button class="btn btn-primary btn-sm" id="cookie-save" type="button">save session</button>
           </div>
           <p class="error" id="cookie-error" role="alert" hidden></p>
+          <p class="hint" id="cookie-note">
+            Saved on this server, so it works from any device you open this page on — no need to re-upload per browser.
+          </p>
         </section>
 
         <!-- 6. error -->
