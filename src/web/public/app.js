@@ -8,6 +8,7 @@ const panels = {
   pick: $('pick-panel'),
   progress: $('progress-panel'),
   done: $('done-panel'),
+  sessions: $('sessions-panel'),
   error: $('error-panel'),
 }
 
@@ -234,6 +235,117 @@ $('again-btn').addEventListener('click', () => {
 $('error-back-btn').addEventListener('click', () => {
   show('paste')
   $('url').select()
+})
+
+// ---------- signed-in sites ----------
+
+let sessionsLoaded = false
+
+async function loadSessions() {
+  const data = await api('/api/cookies')
+  const stored = new Map(data.stored.map(entry => [entry.key, entry]))
+
+  const select = $('cookie-site')
+  if (!select.options.length) {
+    select.replaceChildren(
+      ...data.sites.map(site => {
+        const option = document.createElement('option')
+        option.value = site.key
+        option.textContent = site.label
+        return option
+      }),
+    )
+  }
+
+  const list = $('sessions-list')
+  list.replaceChildren(
+    ...data.sites.map(site => {
+      const entry = stored.get(site.key)
+      const row = document.createElement('div')
+      row.className = 'session'
+
+      const left = document.createElement('div')
+      const name = document.createElement('div')
+      name.className = 'session-name'
+      name.textContent = site.label
+      const meta = document.createElement('div')
+      meta.className = 'session-meta'
+      meta.textContent = entry
+        ? `${entry.cookies} cookies · saved ${new Date(entry.savedAt).toLocaleDateString()}`
+        : site.domains.slice(0, 2).join(', ')
+      left.append(name, meta)
+
+      const right = document.createElement('div')
+      right.style.display = 'flex'
+      right.style.alignItems = 'center'
+      right.style.gap = '8px'
+
+      const state = document.createElement('span')
+      state.className = `session-state${entry ? ' on' : ''}`
+      state.textContent = entry ? 'signed in' : 'no session'
+      right.append(state)
+
+      if (entry) {
+        const remove = document.createElement('button')
+        remove.type = 'button'
+        remove.className = 'btn btn-ghost btn-sm'
+        remove.textContent = 'remove'
+        remove.addEventListener('click', async () => {
+          remove.disabled = true
+          await fetch(`/api/cookies/${site.key}`, {method: 'DELETE'})
+          await loadSessions()
+        })
+        right.append(remove)
+      }
+
+      row.append(left, right)
+      return row
+    }),
+  )
+}
+
+async function openSessions() {
+  $('cookie-error').hidden = true
+  show('sessions')
+  try {
+    await loadSessions()
+    sessionsLoaded = true
+  } catch (error) {
+    $('cookie-error').textContent = error.message
+    $('cookie-error').hidden = false
+  }
+}
+
+$('sessions-open').addEventListener('click', openSessions)
+$('sessions-back').addEventListener('click', () => show('paste'))
+
+$('cookie-upload').addEventListener('click', async () => {
+  const input = $('cookie-file')
+  const err = $('cookie-error')
+  err.hidden = true
+  const file = input.files && input.files[0]
+  if (!file) {
+    err.textContent = 'Choose a cookies.txt file first.'
+    err.hidden = false
+    return
+  }
+  const button = $('cookie-upload')
+  button.disabled = true
+  try {
+    const text = await file.text()
+    await api(`/api/cookies/${$('cookie-site').value}`, {
+      method: 'PUT',
+      headers: {'content-type': 'text/plain'},
+      body: text,
+    })
+    input.value = ''
+    await loadSessions()
+  } catch (error) {
+    err.textContent = error.message
+    err.hidden = false
+  } finally {
+    button.disabled = false
+  }
 })
 
 // ---------- boot ----------

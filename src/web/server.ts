@@ -17,6 +17,7 @@ import path from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {buildChoices, download, ensureYtDlp, findFfmpeg, probe, type DownloadChoice} from '../lib/ytdlp.js'
 import {isProbablyUrl} from '../lib/platforms.js'
+import {CookieStore, KNOWN_SITES, siteForUrl} from './cookies.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PUBLIC_DIR = path.join(HERE, 'public')
@@ -37,8 +38,26 @@ const DIR_BUDGET_BYTES = Number(process.env.YOINKS_DIR_BUDGET_BYTES || 8 * 1024 
 const MAX_ACTIVE = Number(process.env.YOINKS_MAX_ACTIVE || 2)
 /** A probe that hangs holds a request slot; don't let it. */
 const PROBE_TIMEOUT_MS = Number(process.env.YOINKS_PROBE_TIMEOUT_MS || 90_000)
-/** Optional cookies file — the only known way past YouTube's datacenter-IP check. */
-const COOKIES_FILE = process.env.YOINKS_COOKIES_FILE || ''
+/**
+ * Per-site cookie jars, one file per platform. yt-dlp never logs in for us —
+ * these jars are what carry a session for YouTube, X, Instagram and friends.
+ */
+const COOKIE_DIR = process.env.YOINKS_COOKIE_DIR || path.resolve('cookies')
+const cookies = new CookieStore(COOKIE_DIR)
+/**
+ * Painful escape hatch for a single jar covering everything (the old
+ * behaviour). Applied only when no per-site jar matches the URL.
+ */
+const LEGACY_COOKIES_FILE = process.env.YOINKS_COOKIES_FILE || ''
+
+/**
+ * Which cookie file (if any) applies to a download of this URL.
+ * Settings-only sites are validated per-site so one site's session is never
+ * presented to another.
+ */
+async function cookiesFor(url: string): Promise<string | undefined> {
+  return (await cookies.jarForUrl(url)) || LEGACY_COOKIES_FILE || undefined
+}
 
 type JobStatus = 'queued' | 'downloading' | 'processing' | 'done' | 'error' | 'cancelled'
 
@@ -106,6 +125,31 @@ async function readJson(req: IncomingMessage, limit = 16 * 1024): Promise<Record
   } catch {
     throw new HttpError(400, 'Body must be a JSON object.')
   }
+}
+
+/**
+ * Accepts either a raw Netscape file in the body, or JSON {cookies: "..."}.
+ * Uploading a real file with curl is far more comfortable than escaping it.
+ */
+async function readCookieUpload(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length
+    if (size > 2 * 1024 * 1024) throw new HttpError(413, 'Cookies file is too large (2 MB max).')
+    chunks.push(chunk as Buffer)
+  }
+  const text = Buffer.concat(chunks).toString('utf8')
+  const type = (req.headers['content-type'] || '').toLowerCase()
+  if (type.includes('application/json')) {
+    try {
+      const parsed = JSON.parse(text) as {cookies?: unknown}
+      if (typeof parsed.cookies === 'string') return parsed.cookies
+    } catch {
+      // fall through — maybe it really is a jar
+    }
+  }
+  return text
 }
 
 function assertUrl(value: unknown): string {
@@ -224,7 +268,7 @@ function startJob(job: Job): void {
           choice: job.choice,
           outDir,
           filenameTemplate: '%(title)s.%(ext)s',
-          cookiesFile: COOKIES_FILE || undefined,
+          cookiesFile: await cookiesFor(job.url),
         },
         {
           onProgress: progress => {
@@ -285,7 +329,7 @@ async function handleProbe(body: Record<string, unknown>) {
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
   try {
     const {info} = await probe(ytdlpPath, url, {
-      cookiesFile: COOKIES_FILE || undefined,
+      cookiesFile: await cookiesFor(url),
       saveInfo: false,
       signal: controller.signal,
     })
@@ -304,7 +348,16 @@ async function handleProbe(body: Record<string, unknown>) {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.error(`probe failed for ${url}:`, message.slice(0, 300))
-    throw new HttpError(422, controller.signal.aborted ? 'Timed out reading that link.' : friendlyError(message))
+    if (controller.signal.aborted) throw new HttpError(422, 'Timed out reading that link.')
+
+    const friendly = friendlyError(message)
+    // If this site can carry a session and we have none, say so — the most
+    // common cause of "works in my browser, fails here" is simply no cookies.
+    const site = siteForUrl(url)
+    if (site && !(await cookiesFor(url)) && /sign in|login|log in|authentication|not available|no video/i.test(message)) {
+      throw new HttpError(422, `${friendly} — ${site.label} can be signed in from “signed-in sites” below.`)
+    }
+    throw new HttpError(422, friendly)
   } finally {
     clearTimeout(timer)
   }
@@ -317,7 +370,7 @@ async function handleDownload(body: Record<string, unknown>) {
 
   // Re-probe so the choice index can't be forged into arbitrary yt-dlp args.
   const {info} = await probe(ytdlpPath, url, {
-    cookiesFile: COOKIES_FILE || undefined,
+    cookiesFile: await cookiesFor(url),
     saveInfo: false,
     signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
   })
@@ -433,6 +486,39 @@ const server = createServer((req, res) => {
     try {
       if (pathname === '/healthz') return json(res, 200, {ok: true, ytdlp: Boolean(ytdlpPath), active: activeCount()})
 
+      // ---- cookies: which sites can carry a session, and which ones do ----
+      if (pathname === '/api/cookies' && method === 'GET') {
+        return json(res, 200, {sites: KNOWN_SITES, stored: await cookies.list()})
+      }
+      // Does this URL's site have a session we could use?
+      if (pathname === '/api/cookies/lookup' && method === 'POST') {
+        const {url} = await readJson(req)
+        const site = typeof url === 'string' ? siteForUrl(url) : undefined
+        const jar = site ? await cookies.jarForUrl(url as string) : undefined
+        return json(res, 200, {site: site ?? null, hasCookies: Boolean(jar)})
+      }
+
+      const cookieSite = /^\/api\/cookies\/([a-z]+)$/.exec(pathname)
+      if (cookieSite) {
+        const key = cookieSite[1]!
+        if (method === 'PUT' || method === 'POST') {
+          let saved
+          try {
+            saved = await cookies.save(key, await readCookieUpload(req))
+          } catch (error) {
+            // a bad file is the caller's mistake, not a server fault
+            throw new HttpError(400, error instanceof Error ? error.message : 'That cookies file was rejected.')
+          }
+          console.log(`cookies: stored jar for ${key} (${saved.cookies} entries)`)
+          return json(res, 200, {stored: saved})
+        }
+        if (method === 'DELETE') {
+          await cookies.remove(key)
+          console.log(`cookies: removed jar for ${key}`)
+          return json(res, 200, {ok: true})
+        }
+      }
+
       if (pathname === '/api/info' && method === 'POST') return json(res, 200, await handleProbe(await readJson(req)))
       if (pathname === '/api/download' && method === 'POST') {
         const result = await handleDownload(await readJson(req))
@@ -479,6 +565,7 @@ const server = createServer((req, res) => {
 
 async function main(): Promise<void> {
   await fs.mkdir(WORK_DIR, {recursive: true})
+  await cookies.init()
   // Start listening first so the panel's health check passes while yt-dlp resolves.
   server.on('error', error => {
     console.error(`[server] cannot listen on ${HOST}:${PORT}:`, error instanceof Error ? error.message : error)

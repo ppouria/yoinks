@@ -114,6 +114,36 @@ panel that terminates TLS.
 A download never blocks a request: the client polls the job. Finished files
 are served from disk and deleted an hour after they complete.
 
+### Signed-in sites (cookies)
+
+Some sites only release media to a signed-in browser — X in particular returns
+an empty `TweetTombstone` for age-restricted accounts, and YouTube applies an
+IP-level bot check to datacenter hosts. yt-dlp never logs in on our behalf; it
+reads a Netscape `cookies.txt`, so "signing in" here means exporting one from a
+browser that is already logged in.
+
+Open **signed-in sites** in the footer, pick the platform, and upload the file.
+Each platform gets its own jar, and a jar is only ever handed to yt-dlp for URLs
+belonging to that platform — X's `auth_token` is never offered to `youtube.com`.
+
+```sh
+# or from the command line
+curl -X PUT --data-binary @cookies.txt http://127.0.0.1:3000/api/cookies/x
+curl http://127.0.0.1:3000/api/cookies        # what is stored, and for which site
+curl -X DELETE http://127.0.0.1:3000/api/cookies/x
+```
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/cookies` | supported sites + stored jars |
+| `PUT`/`POST` | `/api/cookies/:site` | store a `cookies.txt` (raw body or `{cookies}`) |
+| `DELETE` | `/api/cookies/:site` | forget that session |
+| `POST` | `/api/cookies/lookup` | `{url}` → which site it maps to, and whether a jar exists |
+
+Jars live in `YOINKS_COOKIE_DIR` as `0600` files inside a `0700` directory.
+Treat them like passwords: they grant account access, they expire, and an
+export made on a different IP can make the site flag you for a re-login.
+
 ### Configuration
 
 | Variable | Default | Meaning |
@@ -124,7 +154,8 @@ are served from disk and deleted an hour after they complete.
 | `YOINKS_FILE_TTL_MS` | 1 hour | how long a finished file survives |
 | `YOINKS_MAX_ACTIVE` | 2 | concurrent downloads |
 | `YOINKS_PROBE_TIMEOUT_MS` | 90 s | probe timeout |
-| `YOINKS_COOKIES_FILE` | — | Netscape `cookies.txt` for sites that need a session |
+| `YOINKS_COOKIE_DIR` | `./cookies` | per-site cookie jars |
+| `YOINKS_COOKIES_FILE` | — | one fallback jar used when no per-site jar matches |
 
 ### A note on YouTube from a server
 

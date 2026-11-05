@@ -81,7 +81,37 @@
           </div>
         </section>
 
-        <!-- 5. error -->
+        <!-- 5. sessions: per-site cookie jars -->
+        <section class="panel" id="sessions-panel" hidden>
+          <div class="sessions-head">
+            <h2 class="panel-title" id="sessions-title">Signed-in sites</h2>
+            <button class="btn btn-ghost btn-sm" id="sessions-back" type="button">← back</button>
+          </div>
+          <p class="hint" id="sessions-hint">
+            Some sites only hand over their media to a signed-in browser. Export cookies from a
+            browser you are already logged into, then paste or upload the file here.
+          </p>
+          <div class="sessions" id="sessions-list" aria-live="polite"></div>
+          <details class="howto">
+            <summary>How do I export cookies?</summary>
+            <ol>
+              <li>Install the “Get cookies.txt LOCALLY” extension (Chrome / Firefox / Edge).</li>
+              <li>Log in to the site in that browser, and open any page on it.</li>
+              <li>Click the extension and export <code>cookies.txt</code> for that domain.</li>
+              <li>Upload it below — it is stored on this server, owner-readable only.</li>
+            </ol>
+            <p class="hint warn">Treat the file like a password: it grants access to that account.
+            Use a throwaway account where you can, and re-export when it expires.</p>
+          </details>
+          <div class="cookie-form">
+            <select id="cookie-site" aria-label="Site"></select>
+            <input id="cookie-file" type="file" accept=".txt,text/plain" aria-label="cookies.txt" />
+            <button class="btn btn-primary btn-sm" id="cookie-upload" type="button">save</button>
+          </div>
+          <p class="error" id="cookie-error" role="alert" hidden></p>
+        </section>
+
+        <!-- 6. error -->
         <section class="panel" id="error-panel" hidden role="alert">
           <p class="eyebrow error-eyebrow">✗ that didn’t yoink</p>
           <p class="error" id="error-message"></p>
@@ -93,7 +123,10 @@
 
       <footer class="footer">
         <span id="engine-status" class="dim">powered by yt-dlp</span>
-        <a class="dim" href="https://github.com/pablostanley/yoinks" rel="noopener noreferrer" target="_blank">yoinks</a>
+        <span class="footer-right">
+          <button class="link-btn dim" id="sessions-open" type="button">signed-in sites</button>
+          <a class="dim" href="https://github.com/pablostanley/yoinks" rel="noopener noreferrer" target="_blank">yoinks</a>
+        </span>
       </footer>
     </main>
     <script type="module" src="/app.js"></script>
