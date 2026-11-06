@@ -114,6 +114,33 @@ panel that terminates TLS.
 A download never blocks a request: the client polls the job. Finished files
 are served from disk and deleted an hour after they complete.
 
+### Retention and the download link
+
+Downloads run on the server; the browser gets a link, not a file stream it has
+to babysit. Pick how long the link lives — **4 hours** (default), 12 hours,
+1 day, 3 days or 1 week — on the format picker. The server enforces a ceiling
+(`YOINKS_MAX_RETENTION_HOURS`, default 168), so a forged value cannot live
+longer than a week. Expired files are removed by a sweep that runs every minute,
+and their links start returning 404.
+
+The finished link (`/api/jobs/:id/file`) is shareable: open it from any device
+before it expires to download the file again.
+
+### Spotify
+
+Spotify serves DRM-protected audio, so nothing can pull the stream out of it.
+Instead this app uses [spotDL](https://github.com/spotDL/spotify-downloader) for
+**metadata only** (`spotdl save`, which downloads nothing), then sources the
+audio from a public provider through the same yt-dlp path as everything else —
+so retention, progress and cookie jars all apply unchanged.
+
+```sh
+pip install spotdl            # or set YOINKS_SPOTDL_BIN to its path
+```
+
+Paste an `open.spotify.com/track/...` link; it resolves to "Artist - Title" and
+downloads as mp3. Track links only — a playlist is N tracks and is not built.
+
 ### Signed-in sites (cookies)
 
 Some sites only release media to a signed-in browser — X in particular returns
@@ -157,7 +184,9 @@ export made on a different IP can make the site flag you for a re-login.
 | `HOST` / `PORT` | `127.0.0.1` / `3000` | listen address |
 | `YOINKS_WORK_DIR` | `./downloads` | where finished/in-progress files live |
 | `YOINKS_DIR_BUDGET_BYTES` | 8 GiB | refuse new downloads past this |
-| `YOINKS_FILE_TTL_MS` | 1 hour | how long a finished file survives |
+| `YOINKS_RETENTION_HOURS` | 4 | default lifetime of a finished file |
+| `YOINKS_MAX_RETENTION_HOURS` | 168 | hard ceiling (1 week) |
+| `YOINKS_SPOTDL_BIN` | `spotdl` | path to spotDL for Spotify metadata |
 | `YOINKS_MAX_ACTIVE` | 2 | concurrent downloads |
 | `YOINKS_PROBE_TIMEOUT_MS` | 90 s | probe timeout |
 | `YOINKS_COOKIE_DIR` | `./cookies` | per-site cookie jars |

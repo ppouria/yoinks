@@ -12,7 +12,9 @@ const panels = {
   error: $('error-panel'),
 }
 
-let current = {url: '', title: '', jobId: null, pollTimer: null}
+let current = {url: '', title: '', jobId: null, pollTimer: null, spotify: null}
+let retentionOptions = [{hours: 4, label: '4 hours'}]
+let defaultRetention = 4
 
 function show(name) {
   for (const [key, el] of Object.entries(panels)) el.hidden = key !== name
@@ -83,6 +85,7 @@ $('paste-form').addEventListener('submit', async event => {
     const info = await api('/api/info', {method: 'POST', body: JSON.stringify({url})})
     current.url = url
     current.title = info.title || 'Untitled'
+    current.spotify = info.spotify || null
 
     $('video-title').textContent = current.title
     $('video-meta').textContent =
@@ -138,7 +141,12 @@ async function startDownload(index) {
   try {
     const {job} = await api('/api/download', {
       method: 'POST',
-      body: JSON.stringify({url: current.url, choice: index}),
+      body: JSON.stringify({
+        url: current.url,
+        choice: index,
+        retentionHours: Number($('retention').value),
+        ...(current.spotify ? {title: current.spotify.name, artist: current.spotify.artist} : {}),
+      }),
     })
     current.jobId = job.id
     $('progress-title').textContent = current.title
@@ -174,6 +182,17 @@ function renderProgress(job) {
     stopPolling()
     $('done-title').textContent = job.title
     $('done-meta').textContent = [job.label, formatBytes(job.size)].filter(Boolean).join(' · ')
+
+    const link = `${location.origin}/api/jobs/${job.id}/file`
+    $('done-link').value = link
+    if (job.expiresAt) {
+      const left = job.expiresAt - Date.now()
+      const hours = Math.max(0, Math.round(left / 3600000))
+      const when = new Date(job.expiresAt).toLocaleString()
+      $('done-expiry').textContent = `link works for ${hours >= 24 ? `${Math.round(hours / 24)} day(s)` : `${hours} hour(s)`} — until ${when}`
+    } else {
+      $('done-expiry').textContent = ''
+    }
     show('done')
     return
   }
@@ -225,11 +244,47 @@ $('save-btn').addEventListener('click', () => {
   if (current.jobId) location.href = `/api/jobs/${current.jobId}/file`
 })
 
+$('copy-btn').addEventListener('click', async () => {
+  const button = $('copy-btn')
+  try {
+    await navigator.clipboard.writeText($('done-link').value)
+    button.textContent = 'copied ✓'
+  } catch {
+    // clipboard may be blocked on http or without permission — fall back to select
+    $('done-link').select()
+    button.textContent = 'press ⌘/ctrl+c'
+  }
+  setTimeout(() => (button.textContent = 'copy link'), 1800)
+})
+
 $('again-btn').addEventListener('click', () => {
   current.jobId = null
+  current.spotify = null
   $('url').value = ''
   show('paste')
-  $('url').focus()
+  async function loadConfig() {
+  try {
+    const cfg = await api('/api/config')
+    retentionOptions = cfg.retention.options
+    defaultRetention = cfg.retention.defaultHours
+  } catch {
+    // keep the built-in 4 hour default
+  }
+  const select = $('retention')
+  select.replaceChildren(
+    ...retentionOptions.map(option => {
+      const el = document.createElement('option')
+      el.value = String(option.hours)
+      el.textContent = option.label
+      return el
+    }),
+  )
+  select.value = String(defaultRetention)
+}
+
+void loadConfig()
+
+$('url').focus()
 })
 
 $('error-back-btn').addEventListener('click', () => {
@@ -451,6 +506,28 @@ $('cookie-save').addEventListener('click', async () => {
 })
 
 // ---------- boot ----------
+
+async function loadConfig() {
+  try {
+    const cfg = await api('/api/config')
+    retentionOptions = cfg.retention.options
+    defaultRetention = cfg.retention.defaultHours
+  } catch {
+    // keep the built-in 4 hour default
+  }
+  const select = $('retention')
+  select.replaceChildren(
+    ...retentionOptions.map(option => {
+      const el = document.createElement('option')
+      el.value = String(option.hours)
+      el.textContent = option.label
+      return el
+    }),
+  )
+  select.value = String(defaultRetention)
+}
+
+void loadConfig()
 
 $('url').focus()
 

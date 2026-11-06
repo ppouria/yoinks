@@ -18,6 +18,8 @@ import {fileURLToPath} from 'node:url'
 import {buildChoices, download, ensureYtDlp, findFfmpeg, probe, type DownloadChoice} from '../lib/ytdlp.js'
 import {isProbablyUrl} from '../lib/platforms.js'
 import {CookieStore, KNOWN_SITES, siteForUrl} from './cookies.js'
+import {isSpotifyUrl, lookupSpotify, spotifySearchUrl} from './spotify.js'
+import type {SpotifyTrack} from './spotify.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PUBLIC_DIR = path.join(HERE, 'public')
@@ -30,8 +32,31 @@ const PORT = Number(process.env.PORT || 3000)
  * wiped on restart — a job that survived a redeploy would lose its file.
  */
 const WORK_DIR = process.env.YOINKS_WORK_DIR || path.resolve('downloads')
-/** Downloads are deleted after this long; nothing here is meant to be an archive. */
-const FILE_TTL_MS = Number(process.env.YOINKS_FILE_TTL_MS || 60 * 60 * 1000)
+/** How long a finished file stays downloadable. Default 4 hours. */
+const DEFAULT_RETENTION_HOURS = Number(process.env.YOINKS_RETENTION_HOURS || 4)
+/** Hard ceiling: a file may never outlive this, whatever the caller asks for. */
+const MAX_RETENTION_HOURS = Number(process.env.YOINKS_MAX_RETENTION_HOURS || 168)
+
+/**
+ * What the UI offers. Keep in sync with src/web/public/app.js; the server still
+ * validates against MAX_RETENTION_HOURS so a forged value can't live forever.
+ */
+const RETENTION_OPTIONS = [
+  {hours: 4, label: '4 hours'},
+  {hours: 12, label: '12 hours'},
+  {hours: 24, label: '1 day'},
+  {hours: 72, label: '3 days'},
+  {hours: 168, label: '1 week'},
+]
+
+function retentionMs(requested: unknown): {ms: number; hours: number} {
+  const hours = Number(requested)
+  if (!Number.isFinite(hours) || hours <= 0) {
+    return {ms: DEFAULT_RETENTION_HOURS * 3600_000, hours: DEFAULT_RETENTION_HOURS}
+  }
+  const capped = Math.min(hours, MAX_RETENTION_HOURS)
+  return {ms: capped * 3600_000, hours: capped}
+}
 /** Hard cap on everything sitting in WORK_DIR (files + in-progress downloads). */
 const DIR_BUDGET_BYTES = Number(process.env.YOINKS_DIR_BUDGET_BYTES || 8 * 1024 ** 3)
 /** Concurrent yt-dlp downloads. Hetzner box is small; 2 keeps things civil. */
@@ -63,7 +88,10 @@ type JobStatus = 'queued' | 'downloading' | 'processing' | 'done' | 'error' | 'c
 
 type Job = {
   id: string
+  /** What yt-dlp actually fetches — a search query for Spotify, else the URL. */
   url: string
+  /** Set when the job originated from a Spotify link. */
+  spotify?: SpotifyTrack
   choice: DownloadChoice
   title: string
   status: JobStatus
@@ -81,6 +109,8 @@ type Job = {
   error?: string
   createdAt: number
   expiresAt?: number
+  /** How long this job's file is kept, in hours (as accepted). */
+  retentionHours?: number
   abort: AbortController
 }
 
@@ -226,6 +256,8 @@ function publicJob(job: Job) {
     totalParts: job.totalParts,
     filename: job.status === 'done' ? job.filename : undefined,
     size: job.status === 'done' ? job.size : undefined,
+    expiresAt: job.expiresAt,
+    retentionHours: job.retentionHours,
     error: job.error,
   }
 }
@@ -267,7 +299,10 @@ function startJob(job: Job): void {
           url: job.url,
           choice: job.choice,
           outDir,
-          filenameTemplate: '%(title)s.%(ext)s',
+          // Spotify jobs name the file after the track, not the matched video.
+          filenameTemplate: job.spotify
+            ? `${job.spotify.artist} - ${job.spotify.name}.%(ext)s`.replace(/[\/\\:*?"<>|]/g, '_')
+            : '%(title)s.%(ext)s',
           cookiesFile: await cookiesFor(job.url),
         },
         {
@@ -297,7 +332,7 @@ function startJob(job: Job): void {
       job.downloadedBytes = stat.size
       job.totalBytes = stat.size
       job.status = 'done'
-      job.expiresAt = Date.now() + FILE_TTL_MS
+      job.expiresAt = Date.now() + (job.retentionHours ?? DEFAULT_RETENTION_HOURS) * 3600_000
     } catch (error) {
       const cancelled = job.abort.signal.aborted
       job.status = cancelled ? 'cancelled' : 'error'
@@ -316,7 +351,7 @@ async function reapExpired(): Promise<void> {
       await fs.rm(path.join(WORK_DIR, id), {recursive: true, force: true})
       jobs.delete(id)
     } else if (job.status === 'error' || job.status === 'cancelled') {
-      if (now - job.createdAt > FILE_TTL_MS) jobs.delete(id)
+      if (now - job.createdAt > 3600_000) jobs.delete(id)
     }
   }
 }
@@ -325,6 +360,24 @@ async function reapExpired(): Promise<void> {
 
 async function handleProbe(body: Record<string, unknown>) {
   const url = assertUrl(body.url)
+
+  // Spotify is metadata-only: spotDL resolves the track, we then offer the
+  // audio sourced from a public provider.
+  if (isSpotifyUrl(url)) {
+    const track = await lookupSpotify(url, path.join(WORK_DIR, '.tmp')).catch(error => {
+      throw new HttpError(422, error instanceof Error ? error.message : 'Spotify lookup failed.')
+    })
+    return {
+      title: `${track.name} — ${track.artist}`,
+      uploader: track.album ?? track.artist,
+      duration: track.duration,
+      thumbnail: track.cover,
+      extractor: 'Spotify (audio from public sources)',
+      spotify: track,
+      source: 'spotify',
+      choices: [{index: 0, label: 'audio only · mp3', kind: 'audio'}],
+    }
+  }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS)
   try {
@@ -367,15 +420,33 @@ async function handleDownload(body: Record<string, unknown>) {
   const url = assertUrl(body.url)
   const index = Number(body.choice)
   if (!Number.isInteger(index) || index < 0) throw new HttpError(400, 'Pick a format first.')
+  const retention = retentionMs(body.retentionHours)
+
+  // Spotify track: the probe told the client to send it back, so we do not
+  // have to hit Spotify again just to know what to search for.
+  let spotify: SpotifyTrack | undefined
+  let searchUrl = url
+  if (isSpotifyUrl(url)) {
+    const title = typeof body.title === 'string' ? body.title : ''
+    const artist = typeof body.artist === 'string' ? body.artist : ''
+    if (title && artist) {
+      spotify = {id: '', name: title, artist, url}
+      searchUrl = spotifySearchUrl(spotify)
+    } else {
+      const track = await lookupSpotify(url, path.join(WORK_DIR, '.tmp'))
+      spotify = track
+      searchUrl = spotifySearchUrl(track)
+    }
+  }
 
   // Re-probe so the choice index can't be forged into arbitrary yt-dlp args.
-  const {info} = await probe(ytdlpPath, url, {
-    cookiesFile: await cookiesFor(url),
+  const {info} = await probe(ytdlpPath, searchUrl, {
+    cookiesFile: await cookiesFor(searchUrl),
     saveInfo: false,
     signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
   })
   const choices = buildChoices(info)
-  const choice = choices[index]
+  const choice = spotify ? choices[choices.length - 1] : choices[index]
   if (!choice) throw new HttpError(400, 'That format is no longer offered for this link.')
 
   const used = await dirSize(WORK_DIR)
@@ -388,15 +459,17 @@ async function handleDownload(body: Record<string, unknown>) {
 
   const job: Job = {
     id: makeId(),
-    url,
+    url: searchUrl,
+    spotify,
     choice,
-    title: info.title ?? 'Untitled',
+    title: spotify ? `${spotify.name} - ${spotify.artist}` : (info.title ?? 'Untitled'),
     status: 'queued',
     downloadedBytes: 0,
     bytesOnDisk: 0,
     part: 0,
     totalParts: 1,
     createdAt: Date.now(),
+    retentionHours: retention.hours,
     abort: new AbortController(),
   }
   jobs.set(job.id, job)
@@ -485,6 +558,12 @@ const server = createServer((req, res) => {
 
     try {
       if (pathname === '/healthz') return json(res, 200, {ok: true, ytdlp: Boolean(ytdlpPath), active: activeCount()})
+
+      if (pathname === '/api/config' && method === 'GET') {
+        return json(res, 200, {
+          retention: {options: RETENTION_OPTIONS, defaultHours: DEFAULT_RETENTION_HOURS, maxHours: MAX_RETENTION_HOURS},
+        })
+      }
 
       // ---- cookies: which sites can carry a session, and which ones do ----
       if (pathname === '/api/cookies' && method === 'GET') {

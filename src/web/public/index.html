@@ -50,6 +50,13 @@
             </div>
           </div>
           <div class="formats" id="formats" role="radiogroup" aria-label="Download format"></div>
+
+          <div class="retention">
+            <label class="retention-label" for="retention">keep file for</label>
+            <select id="retention" aria-describedby="retention-hint"></select>
+            <span class="hint" id="retention-hint">the link stops working after this</span>
+          </div>
+
           <button class="btn btn-ghost" id="back-btn" type="button">← paste another link</button>
         </section>
 
@@ -75,6 +82,11 @@
           <p class="eyebrow">✓ yoinked</p>
           <h1 class="title" id="done-title"></h1>
           <p class="meta" id="done-meta"></p>
+          <p class="meta" id="done-expiry"></p>
+          <div class="share">
+            <input id="done-link" type="text" readonly aria-label="Download link" />
+            <button class="btn btn-ghost btn-sm" id="copy-btn" type="button">copy link</button>
+          </div>
           <div class="progress-actions">
             <button class="btn btn-primary" id="save-btn" type="button">save file</button>
             <button class="btn btn-ghost" id="again-btn" type="button">yoink another</button>
