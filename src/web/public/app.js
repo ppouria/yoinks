@@ -12,7 +12,7 @@ const panels = {
   error: $('error-panel'),
 }
 
-let current = {url: '', title: '', jobId: null, pollTimer: null, spotify: null}
+let current = {url: '', title: '', jobId: null, pollTimer: null, spotify: null, audioUrl: null}
 let retentionOptions = [{hours: 4, label: '4 hours'}]
 let defaultRetention = 4
 
@@ -86,6 +86,7 @@ $('paste-form').addEventListener('submit', async event => {
     current.url = url
     current.title = info.title || 'Untitled'
     current.spotify = info.spotify || null
+    current.audioUrl = info.audioUrl || null
 
     $('video-title').textContent = current.title
     $('video-meta').textContent =
@@ -146,6 +147,7 @@ async function startDownload(index) {
         choice: index,
         retentionHours: Number($('retention').value),
         ...(current.spotify ? {title: current.spotify.name, artist: current.spotify.artist} : {}),
+        ...(current.audioUrl ? {audioUrl: current.audioUrl} : {}),
       }),
     })
     current.jobId = job.id

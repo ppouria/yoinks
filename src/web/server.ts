@@ -18,7 +18,8 @@ import {fileURLToPath} from 'node:url'
 import {buildChoices, download, ensureYtDlp, findFfmpeg, probe, type DownloadChoice} from '../lib/ytdlp.js'
 import {isProbablyUrl} from '../lib/platforms.js'
 import {CookieStore, KNOWN_SITES, siteForUrl} from './cookies.js'
-import {isSpotifyUrl, lookupSpotify, spotifySearchUrl} from './spotify.js'
+import {isSpotifyUrl, lookupSpotify} from './spotify.js'
+import {resolveAudioSource} from './audio-sources.js'
 import type {SpotifyTrack} from './spotify.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -367,14 +368,31 @@ async function handleProbe(body: Record<string, unknown>) {
     const track = await lookupSpotify(url, path.join(WORK_DIR, '.tmp')).catch(error => {
       throw new HttpError(422, error instanceof Error ? error.message : 'Spotify lookup failed.')
     })
+
+    // Find audio now, not at download time — the point is to fail here, in the
+    // UI, with a readable reason, rather than after the user waits.
+    let source
+    try {
+      source = await resolveAudioSource(`${track.artist} - ${track.name}`, {
+        ytdlp: ytdlpPath,
+        cookiesFile: await cookiesFor('https://www.youtube.com/'),
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        expectedSeconds: track.duration,
+      })
+    } catch (error) {
+      console.error(`spotify audio lookup failed for ${track.id}:`, (error as Error).message.slice(0, 300))
+      throw new HttpError(422, (error as Error).message)
+    }
+
     return {
       title: `${track.name} — ${track.artist}`,
       uploader: track.album ?? track.artist,
       duration: track.duration,
       thumbnail: track.cover,
-      extractor: 'Spotify (audio from public sources)',
+      extractor: `Spotify → audio from ${source.label}`,
       spotify: track,
       source: 'spotify',
+      audioUrl: source.url,
       choices: [{index: 0, label: 'audio only · mp3', kind: 'audio'}],
     }
   }
@@ -429,13 +447,22 @@ async function handleDownload(body: Record<string, unknown>) {
   if (isSpotifyUrl(url)) {
     const title = typeof body.title === 'string' ? body.title : ''
     const artist = typeof body.artist === 'string' ? body.artist : ''
-    if (title && artist) {
-      spotify = {id: '', name: title, artist, url}
-      searchUrl = spotifySearchUrl(spotify)
+    const knownUrl = typeof body.audioUrl === 'string' ? body.audioUrl : ''
+    if (title && artist) spotify = {id: '', name: title, artist, url}
+    else spotify = await lookupSpotify(url, path.join(WORK_DIR, '.tmp'))
+
+    // Reuse the exact source the probe validated; re-searching here could land
+    // on a different, blocked video.
+    if (knownUrl.startsWith('http')) {
+      searchUrl = knownUrl
     } else {
-      const track = await lookupSpotify(url, path.join(WORK_DIR, '.tmp'))
-      spotify = track
-      searchUrl = spotifySearchUrl(track)
+      const source = await resolveAudioSource(`${spotify.artist} - ${spotify.name}`, {
+        ytdlp: ytdlpPath,
+        cookiesFile: await cookiesFor('https://www.youtube.com/'),
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+        expectedSeconds: spotify.duration,
+      })
+      searchUrl = source.url
     }
   }
 

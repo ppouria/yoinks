@@ -141,6 +141,16 @@ pip install spotdl            # or set YOINKS_SPOTDL_BIN to its path
 Paste an `open.spotify.com/track/...` link; it resolves to "Artist - Title" and
 downloads as mp3. Track links only — a playlist is N tracks and is not built.
 
+Audio is resolved at *probe* time across several sources (YouTube, a YouTube
+audio search, SoundCloud), and each candidate is validated before it is offered:
+it must have an audio stream and its duration must match Spotify's to within
+20%. That last check matters — SoundCloud search returns 30-second teasers, and
+shipping one of those as "your song" is worse than an honest error.
+
+If no source can be reached, the UI says so up front instead of failing after a
+download. The usual cause is YouTube's IP-level bot check on datacenter hosts;
+a YouTube session under **signed-in sites** is the only reliable fix.
+
 ### Signed-in sites (cookies)
 
 Some sites only release media to a signed-in browser — X in particular returns
