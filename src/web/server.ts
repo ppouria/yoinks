@@ -21,8 +21,17 @@ import {isProbablyUrl} from '../lib/platforms.js'
 import {CookieStore, KNOWN_SITES, siteForUrl} from './cookies.js'
 import {enrichAlbumFields, isSpotifyUrl, lookupSpotify} from './spotify.js'
 import {resolveAudioSource} from './audio-sources.js'
+import {deezerTrackId, deezerTrackMedia, isDeezerUrl, searchDeezer, type DeezerTrack} from './deezer.js'
 import {applyTags} from './tagging.js'
-import {fetchParallel, resolveStream, StreamExpiredError, invalidateStream, supportsFastPath} from './fastfetch.js'
+import {
+  directStream,
+  fetchParallel,
+  isDirectFile,
+  invalidateStream,
+  resolveStream,
+  StreamExpiredError,
+  supportsFastPath,
+} from './fastfetch.js'
 import type {SpotifyTrack} from './spotify.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -86,6 +95,22 @@ const LEGACY_COOKIES_FILE = process.env.YOINKS_COOKIES_FILE || ''
  */
 async function cookiesFor(url: string): Promise<string | undefined> {
   return (await cookies.jarForUrl(url)) || LEGACY_COOKIES_FILE || undefined
+}
+
+/**
+ * Does a source track length match what we asked for? Guards against picking up
+ * a 30-second preview, a live version or a different mix.
+ */
+function durationMatches(actual?: number, expected?: number): boolean {
+  if (!expected || expected <= 0) return true
+  if (!actual || actual <= 0) return true
+  const ratio = actual / expected
+  return ratio >= 0.9 && ratio <= 1.1
+}
+
+/** The Deezer session, if the user added one. Drives the fastest path. */
+async function deezerArl(): Promise<string> {
+  return (await cookies.value('deezer', 'arl')) ?? ''
 }
 
 type JobStatus = 'queued' | 'downloading' | 'processing' | 'done' | 'error' | 'cancelled'
@@ -328,11 +353,13 @@ async function sampleBytesOnDisk(job: Job): Promise<void> {
 async function tryFastDownload(job: Job, outDir: string, wantAudio: boolean, label: string): Promise<string> {
   // Video+audio merging needs ffmpeg, so only a progressive (muxed) format is
   // eligible. That is exactly what yt-dlp's `b` picks, and `-g` will say so.
-  const stream = await resolveStream(ytdlpPath, job.url, {
-    cookiesFile: await cookiesFor(job.url),
-    preferAudio: wantAudio,
-    height: wantAudio ? undefined : Number(/^(\d{3,4})p/.exec(label)?.[1]) || undefined,
-  })
+  const stream = isDirectFile(job.url)
+    ? directStream(job.url)
+    : await resolveStream(ytdlpPath, job.url, {
+        cookiesFile: await cookiesFor(job.url),
+        preferAudio: wantAudio,
+        height: wantAudio ? undefined : Number(/^(\d{3,4})p/.exec(label)?.[1]) || undefined,
+      })
 
   const ext =
     stream.mime?.includes('webm') ? (wantAudio ? 'webm' : 'webm')
@@ -393,7 +420,8 @@ function startJob(job: Job): void {
           throw error
         })
 
-      const fast = supportsFastPath(job.url)
+      const fastEligible = supportsFastPath(job.url) || isDirectFile(job.url)
+      const fast = fastEligible
         ? await attemptFast().catch(error => {
             console.log(`fast path unavailable for ${job.id}:`, (error as Error).message.slice(0, 120))
             return undefined
@@ -494,6 +522,29 @@ async function reapExpired(): Promise<void> {
 async function handleProbe(body: Record<string, unknown>) {
   const url = assertUrl(body.url)
 
+  // A native deezer.com link needs no Spotify hop at all.
+  if (isDeezerUrl(url)) {
+    const trackId = deezerTrackId(url)
+    if (!trackId) throw new HttpError(422, 'That looks like a Deezer link, but not a single track. Track links only.')
+    let hit
+    try {
+      hit = await deezerTrackMedia(trackId, await deezerArl())
+    } catch (error) {
+      throw new HttpError(422, (error as Error).message)
+    }
+    return {
+      title: `${hit.track.title} — ${hit.track.artist}`,
+      uploader: hit.track.album ?? hit.track.artist,
+      duration: hit.track.duration,
+      extractor: 'Deezer',
+      source: 'deezer',
+      audioUrl: hit.url,
+      previewUrl: hit.url,
+      deezer: hit.track,
+      choices: [{index: 0, label: 'audio only · mp3', kind: 'audio'}],
+    }
+  }
+
   // Spotify is metadata-only: spotDL resolves the track, we then offer the
   // audio sourced from a public provider.
   if (isSpotifyUrl(url)) {
@@ -503,31 +554,50 @@ async function handleProbe(body: Record<string, unknown>) {
 
     // Find audio now, not at download time — the point is to fail here, in the
     // UI, with a readable reason, rather than after the user waits.
-    let source
+    const query = `${track.artist} - ${track.name}`
+
+    // Deezer first: one API call returns a plain CDN file, which is several
+    // times faster than anything that goes through yt-dlp. Only a *full-length*
+    // Deezer match counts — a 30s preview would be a wrong file.
+    let deezer: {url: string; label: string} | undefined
     try {
-      source = await resolveAudioSource(`${track.artist} - ${track.name}`, {
-        ytdlp: ytdlpPath,
-        cookiesFile: await cookiesFor('https://www.youtube.com/'),
-        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-        expectedSeconds: track.duration,
-      })
+      const hit = await searchDeezer(query, await deezerArl())
+      if (durationMatches(hit.track.duration, track.duration)) {
+        deezer = {url: hit.url, label: 'Deezer'}
+      }
     } catch (error) {
-      console.error(`spotify audio lookup failed for ${track.id}:`, (error as Error).message.slice(0, 300))
-      throw new HttpError(422, (error as Error).message)
+      console.log(`deezer lookup skipped: ${(error as Error).message.slice(0, 120)}`)
     }
+
+    if (!deezer) {
+      try {
+        const source = await resolveAudioSource(query, {
+          ytdlp: ytdlpPath,
+          cookiesFile: await cookiesFor('https://www.youtube.com/'),
+          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+          expectedSeconds: track.duration,
+        })
+        deezer = {url: source.url, label: source.label}
+      } catch (error) {
+        console.error(`spotify audio lookup failed for ${track.id}:`, (error as Error).message.slice(0, 300))
+        throw new HttpError(422, (error as Error).message)
+      }
+    }
+
+    const viaDeezer = deezer.label === 'Deezer'
 
     return {
       title: `${track.name} — ${track.artist}`,
       uploader: track.album ?? track.artist,
       duration: track.duration,
       thumbnail: track.cover,
-      extractor: `Spotify → audio from ${source.label}`,
+      extractor: `Spotify → audio from ${deezer.label}`,
       spotify: track,
       source: 'spotify',
-      audioUrl: source.url,
-      // Playable, same-origin stream for the player (the raw source URL is a
-      // web page the browser cannot play).
-      previewUrl: `/api/preview?url=${encodeURIComponent(source.url)}`,
+      audioUrl: deezer.url,
+      // A Deezer URL is already a playable file; a YouTube page is not, so it
+      // needs the same-origin proxy instead.
+      previewUrl: viaDeezer ? deezer.url : `/api/preview?url=${encodeURIComponent(deezer.url)}`,
       choices: [{index: 0, label: 'audio only · mp3', kind: 'audio'}],
     }
   }
@@ -581,7 +651,21 @@ async function handleDownload(body: Record<string, unknown>) {
   // have to hit Spotify again just to know what to search for.
   let spotify: SpotifyTrack | undefined
   let searchUrl = url
-  if (isSpotifyUrl(url)) {
+  if (isDeezerUrl(url)) {
+    // Deezer links resolve straight to a CDN file; the fast path fetches it.
+    const trackId = deezerTrackId(url)
+    if (!trackId) throw new HttpError(400, 'That looks like a Deezer link, but not a single track.')
+    const hit = await deezerTrackMedia(trackId, await deezerArl())
+    searchUrl = hit.url
+    spotify = {
+      id: hit.track.id,
+      name: hit.track.title,
+      artist: hit.track.artist,
+      album: hit.track.album,
+      duration: hit.track.duration,
+      url,
+    }
+  } else if (isSpotifyUrl(url)) {
     const title = typeof body.title === 'string' ? body.title : ''
     const artist = typeof body.artist === 'string' ? body.artist : ''
     const knownUrl = typeof body.audioUrl === 'string' ? body.audioUrl : ''

@@ -25,6 +25,9 @@ const SITE_RULES: Array<{key: string; label: string; domains: string[]}> = [
   {key: 'facebook', label: 'Facebook', domains: ['facebook.com', 'fb.watch']},
   {key: 'twitch', label: 'Twitch', domains: ['twitch.tv']},
   {key: 'threads', label: 'Threads', domains: ['threads.net', 'threads.com']},
+  // A single `arl` cookie is the whole session; it also powers the fast
+  // download path, not just metadata.
+  {key: 'deezer', label: 'Deezer', domains: ['deezer.com']},
 ]
 
 export const KNOWN_SITES = SITE_RULES.map(({key, label, domains}) => ({key, label, domains}))
@@ -166,6 +169,23 @@ export class CookieStore {
   async remove(key: string): Promise<void> {
     await fs.rm(this.jarPath(key), {force: true})
     await fs.rm(this.metaPath(key), {force: true})
+  }
+
+  /** One cookie's value by name, for services driven by a single token. */
+  async value(key: string, name: string): Promise<string | undefined> {
+    let text: string
+    try {
+      text = await fs.readFile(this.jarPath(key), 'utf8')
+    } catch {
+      return undefined
+    }
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim()
+      if (!line || (line.startsWith('#') && !line.startsWith('#HttpOnly_'))) continue
+      const fields = line.replace(/^#HttpOnly_/, '').split('\t')
+      if (fields.length >= 7 && fields[5] === name) return fields[6]
+    }
+    return undefined
   }
 
   /** The jar to pass to yt-dlp for this URL, if the site has one. */

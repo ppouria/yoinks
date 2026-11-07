@@ -52,6 +52,16 @@ export type ResolvedStream = {
  */
 const DIRECT_HOSTS = ['youtube.com', 'youtu.be', 'soundcloud.com']
 
+/** Deezer hands out a plain CDN file, so no resolve step is needed. */
+export function isDirectFile(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return host.endsWith('dzcdn.net') || host.endsWith('deezer.com') || host.endsWith('.deezer.com')
+  } catch {
+    return false
+  }
+}
+
 export function supportsFastPath(url: string): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase()
@@ -99,6 +109,11 @@ export function invalidateStream(url: string): void {
 
 /** Memoise in-flight resolutions so two requests don't spawn yt-dlp twice. */
 const inFlight = new Map<string, Promise<ResolvedStream>>()
+
+/** A URL that is already the media itself — nothing to resolve. */
+export function directStream(url: string): ResolvedStream {
+  return {url, resolvedAt: Date.now()}
+}
 
 export async function resolveStream(
   ytdlp: string,

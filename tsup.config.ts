@@ -19,7 +19,7 @@ export default defineConfig([
     outDir: 'dist/web',
     // tsup's publicDir flattens files into the output root, and server.ts
     // serves ./public next to itself — copy it explicitly instead.
-    onSuccess: 'node -e "const f=require(\'node:fs\');f.cpSync(\'src/web/public\',\'dist/web/public\',{recursive:true})"',
+    onSuccess: 'node -e "const f=require(\'node:fs\');f.cpSync(\'src/web/public\',\'dist/web/public\',{recursive:true});f.cpSync(\'src/web/deezer_bridge.py\',\'dist/web/deezer_bridge.py\')"',
     external: ['ffmpeg-static'],
   },
 ])

@@ -31,6 +31,7 @@ const NETSCAPE_MARKER = "# Netscape HTTP Cookie File"
 /** Domain used when pasted data carries none of its own. */
 const SITE_DOMAIN: Record<string, string> = {
   youtube: ".youtube.com",
+  deezer: ".deezer.com",
   x: ".x.com",
   instagram: ".instagram.com",
   tiktok: ".tiktok.com",
@@ -248,8 +249,18 @@ export function SessionsDialog({
               placeholder={`${NETSCAPE_MARKER}\n.x.com\tTRUE\t/\tTRUE\t1830000000\tauth_token\t…`}
             />
             <FieldDescription>
-              In Cookie-Editor choose Export → Netscape and paste the whole thing. Chrome&apos;s JSON
-              export and a plain “name=value; …” header are converted automatically.
+              {site === "deezer" ? (
+                <>
+                  Deezer needs one cookie, <code>arl</code>. Log in at deezer.com, open DevTools →
+                  Application → Cookies, and paste the <code>arl</code> value — a free account is
+                  enough, and it makes downloads much faster.
+                </>
+              ) : (
+                <>
+                  In Cookie-Editor choose Export → Netscape and paste the whole thing. Chrome&apos;s
+                  JSON export and a plain “name=value; …” header are converted automatically.
+                </>
+              )}
             </FieldDescription>
           </Field>
         </FieldGroup>

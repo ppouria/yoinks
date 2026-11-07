@@ -137,6 +137,20 @@ Spotify) is not playable media. `GET /api/preview?url=…` resolves the signed
 stream with `yt-dlp -g` and proxies it same-origin, so the `<audio>` element
 gets real bytes and Range requests keep seeking working.
 
+### Deezer (fastest audio source)
+
+Deezer is the only source that returns a plain CDN file after a single API call
+— no yt-dlp, no JS challenge, no manifest — so it is tried **first** for every
+Spotify track and used directly for `deezer.com/track/…` links.
+
+Add an `arl` cookie under **Sessions → Deezer** (DevTools → Application →
+Cookies → `arl`). A free account is enough (128 kbps mp3); a premium one gets
+320/flac. Without a session Deezer only serves 30-second previews, which are
+never accepted as a match — the YouTube path takes over instead.
+
+The protocol lives in `src/web/deezer_bridge.py` (one JSON request in, one JSON
+answer out) and needs `pip install deezer-py` next to yt-dlp.
+
 ### Download speed
 
 Profiling showed the transfer was never the bottleneck — googlevideo serves a
