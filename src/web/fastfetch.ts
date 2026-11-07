@@ -40,6 +40,8 @@ function mimeFromUrl(streamUrl: string): string | undefined {
 
 export type ResolvedStream = {
   url: string
+  /** True when the resolved stream carries video too and needs extraction. */
+  needsExtract?: boolean
   /** Content length, when the CDN reports it. */
   size?: number
   mime?: string
@@ -112,7 +114,19 @@ const inFlight = new Map<string, Promise<ResolvedStream>>()
 
 /** A URL that is already the media itself — nothing to resolve. */
 export function directStream(url: string): ResolvedStream {
-  return {url, resolvedAt: Date.now()}
+  // Carry the type from the URL: without a mime the caller cannot tell an mp3
+  // from a webm, and an audio job would be written with the wrong extension.
+  let mime: string | undefined
+  try {
+    const pathname = new URL(url).pathname.toLowerCase()
+    if (pathname.endsWith('.mp3')) mime = 'audio/mpeg'
+    else if (pathname.endsWith('.flac')) mime = 'audio/flac'
+    else if (pathname.endsWith('.m4a')) mime = 'audio/mp4'
+    else if (pathname.endsWith('.webm')) mime = 'audio/webm'
+  } catch {
+    // not a parseable URL; the extension falls back to a default
+  }
+  return {url, mime, resolvedAt: Date.now()}
 }
 
 export async function resolveStream(
@@ -134,18 +148,26 @@ export async function resolveStream(
     // only one half and answer the combined spec with "Requested format is not
     // available" even though the other exists — so try several equivalent
     // specs per client instead of assuming one works everywhere.
+    // For audio, only an audio-bearing stream is acceptable — `b` (muxed video)
+    // would ship a 10MB video for a 3MB song. When no audio-only format exists
+    // yt-dlp reports the failure and the caller falls back to its own download,
+    // which merges/extracts with ffmpeg.
     const formats = opts.preferAudio
-      ? ['ba/b', 'ba', 'bestaudio/best', '140/140-drc']
+      ? ['ba', 'bestaudio', '140/140-drc/251']
+
       : opts.height
         ? [`b[height<=${opts.height}]`, `bv*[height<=${opts.height}]+ba/b[height<=${opts.height}]`, 'b']
         : ['b', 'bv*+ba/b']
 
-    // Only clients whose URLs this CDN actually serves: an `mweb` URL is
-    // rejected with 403 even though resolving it succeeds, so offering it would
-    // waste a round-trip and then fail. visionos and tv_simply both return 206.
-    // Each is retried because YouTube's "Requested format is not available"
-    // answer varies between identical requests.
-    const clients = ['visionos', 'tv_simply', 'mweb']
+    // Which player client works depends on whether we are signed in, and that
+    // is not predictable per video:
+    //   anonymous → visionos/tv_simply answer without a JS challenge
+    //   signed in → those return storyboards only, and `web` is the one that
+    //               yields a fetchable stream (mweb resolves but its URL 403s)
+    // Each yt-dlp invocation costs ~0.5s of start-up plus network, so the list
+    // is short and ordered for the session we actually have — trying every
+    // combination turned a download into a minute of process spawns.
+    const clients = opts.cookiesFile ? ['web', 'visionos'] : ['visionos', 'web']
 
     let streamUrl: string | undefined
     let lastError: unknown
@@ -179,6 +201,28 @@ export async function resolveStream(
       }
       if (streamUrl) break
     }
+
+    // Some videos genuinely have no audio-only stream (only itag 18, a muxed
+    // 240p file). Fetching that is still far faster than a full yt-dlp
+    // download; the caller strips the video track with ffmpeg afterwards.
+    let needsExtract = false
+    if (!streamUrl && opts.preferAudio) {
+      for (const client of clients) {
+        const args = ['-g', '-f', 'b', '--no-playlist', '--no-warnings', '--extractor-args', `youtube:player_client=${client}`]
+        if (opts.cookiesFile) args.push('--cookies', opts.cookiesFile)
+        args.push(url)
+        try {
+          const candidate = await runYtDlp(ytdlp, args, 20_000)
+          if (candidate.includes('.m3u8')) continue
+          streamUrl = candidate
+          needsExtract = true
+          break
+        } catch (error) {
+          lastError = error
+        }
+      }
+    }
+
     if (!streamUrl) throw lastError ?? new Error('no direct stream available')
 
     // Size and type come from curl for the same reason the download does:
@@ -197,6 +241,7 @@ export async function resolveStream(
 
     const resolved: ResolvedStream = {
       url: streamUrl,
+      needsExtract,
       size,
       mime: mime ?? mimeFromUrl(streamUrl),
       resolvedAt: Date.now(),

@@ -67,7 +67,9 @@ function normalise(reply: BridgeReply): DeezerResult {
       title: track.title ?? 'Unknown title',
       artist: track.artist ?? 'Unknown artist',
       album: track.album,
-      duration: track.duration,
+      // Deezer sends duration as a string ("239"); everything downstream does
+      // arithmetic on it.
+      duration: Number(track.duration) || undefined,
     },
     url: reply.url,
   }

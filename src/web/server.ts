@@ -374,10 +374,14 @@ async function tryFastDownload(job: Job, outDir: string, wantAudio: boolean, lab
   job.part = 0
   const startedAt = Date.now()
 
+  const fetched = target
   await fetchParallel(stream.url, target, {
     signal: job.abort.signal,
     onProgress: (downloaded, total) => {
       job.downloadedBytes = downloaded
+      // The UI reports bytesOnDisk; the fast path writes parts to disk, so this
+      // is the number that actually moves during the transfer.
+      job.bytesOnDisk = downloaded
       job.totalBytes = total || stream.size
       const elapsed = (Date.now() - startedAt) / 1000
       if (elapsed > 0.1) {
@@ -387,6 +391,32 @@ async function tryFastDownload(job: Job, outDir: string, wantAudio: boolean, lab
       }
     },
   })
+
+  // A muxed stream still holds video; extract the audio track so the user gets
+  // a song rather than a 240p video file.
+  if (stream.needsExtract && wantAudio) {
+    job.status = 'processing'
+    const mp3 = fetched.replace(/\.[^.]+$/, '.mp3')
+    await new Promise<void>((resolve, reject) => {
+      const ff = spawn(ffmpegLocation ?? 'ffmpeg', [
+        '-y',
+        '-v',
+        'error',
+        '-i',
+        fetched,
+        '-vn',
+        '-acodec',
+        'libmp3lame',
+        '-q:a',
+        '0',
+        mp3,
+      ])
+      ff.on('error', reject)
+      ff.on('close', code => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited with ${code}`))))
+    })
+    await fs.rm(fetched, {force: true})
+    return mp3
+  }
 
   return target
 }
@@ -423,7 +453,7 @@ function startJob(job: Job): void {
       const fastEligible = supportsFastPath(job.url) || isDirectFile(job.url)
       const fast = fastEligible
         ? await attemptFast().catch(error => {
-            console.log(`fast path unavailable for ${job.id}:`, (error as Error).message.slice(0, 120))
+            console.log(`fast path unavailable for ${job.id}:`, (error as Error).message.slice(0, 200))
             return undefined
           })
         : undefined
@@ -686,9 +716,13 @@ async function handleDownload(body: Record<string, unknown>) {
     }
 
     // Reuse the exact source the probe validated; re-searching here could land
-    // on a different, blocked video.
+    // on a different, blocked video. A Deezer URL is already the media itself,
+    // so it goes straight to the fast path.
+    const knownPreview = typeof body.previewUrl === 'string' ? body.previewUrl : ''
     if (knownUrl.startsWith('http')) {
       searchUrl = knownUrl
+    } else if (knownPreview.startsWith('http')) {
+      searchUrl = knownPreview
     } else {
       const source = await resolveAudioSource(`${spotify.artist} - ${spotify.name}`, {
         ytdlp: ytdlpPath,

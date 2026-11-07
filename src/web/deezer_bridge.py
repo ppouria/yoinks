@@ -53,10 +53,9 @@ def main():
 
     # A free account gets 128 kbps mp3; premium accounts get 320/flac. Ask for
     # the best the account allows and let Deezer downgrade.
-    try:
-        formats = [deezer.TrackFormats.MP3_320, deezer.TrackFormats.MP3_128]
-    except AttributeError:
-        formats = [deezer.TrackFormats.MP3_128]
+    # deezer-py's TrackFormats are plain ints, but get_tracks_url compares the
+    # format with str.startswith — so it wants the format *names*.
+    formats = ["MP3_320", "MP3_128"]
 
     def url_for(track):
         last_error = None
@@ -76,8 +75,20 @@ def main():
         query = (request.get("query") or "").strip()
         if not query:
             fail("empty query")
+        # `gw.get_track` expects a numeric id, so search first and then load the
+        # best hit. The public API is used for the search itself: it needs no
+        # session and answers faster than the internal gateway.
         try:
-            track = client.gw.get_track(query)
+            import deezer as _deezer
+            hits = client.gw.search(query)
+            track_id = None
+            if hits and hits.get("TRACK"):
+                first = hits["TRACK"].get("data") or []
+                if first:
+                    track_id = first[0].get("SNG_ID")
+            if not track_id:
+                fail("no Deezer match")
+            track = client.gw.get_track(track_id)
         except Exception as exc:  # noqa: BLE001
             fail(f"Deezer search failed: {exc}")
         if not track:

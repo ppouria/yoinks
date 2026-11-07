@@ -107,6 +107,8 @@ export const api = {
     title?: string
     artist?: string
     audioUrl?: string
+    /** Same-origin (or direct CDN) stream the probe already validated. */
+    previewUrl?: string
   }) => request<{ job: Job }>("/api/download", { method: "POST", body: JSON.stringify(params) }),
 
   job: (id: string) => request<Job>(`/api/jobs/${id}`),

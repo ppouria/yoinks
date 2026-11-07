@@ -125,6 +125,7 @@ export function App() {
         title: info.spotify?.name,
         artist: info.spotify?.artist,
         audioUrl: info.audioUrl,
+        previewUrl: info.previewUrl,
       })
       setJob(created)
     } catch (error) {
