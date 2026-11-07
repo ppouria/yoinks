@@ -258,6 +258,11 @@ export function download(
      * so it uses the full video title instead.
      */
     filenameTemplate?: string
+    /**
+     * Extra `--ppa` (post-processor) arguments. Used to attach ID3 tags and
+     * cover art to the audio after extraction.
+     */
+    postProcessorArgs?: string[]
     choice: DownloadChoice
     outDir: string
   },
@@ -284,6 +289,9 @@ export function download(
   ]
   if (opts.ffmpegLocation) args.push('--ffmpeg-location', opts.ffmpegLocation)
   if (opts.cookiesFile) args.push('--cookies', opts.cookiesFile)
+  // --ppa applies to the post-processor chain; metadata/cover must survive the
+  // audio extraction, which otherwise writes a bare stream with no tags.
+  if (opts.postProcessorArgs?.length) args.push('--ppa', `ExtractAudio+ffmpeg_o:${opts.postProcessorArgs.join(' ')}`)
 
   return new Promise((resolve, reject) => {
     const child = spawn(opts.ytdlp, args, {signal})

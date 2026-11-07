@@ -151,6 +151,13 @@ If no source can be reached, the UI says so up front instead of failing after a
 download. The usual cause is YouTube's IP-level bot check on datacenter hosts;
 a YouTube session under **signed-in sites** is the only reliable fix.
 
+**Tagging.** The audio arrives carrying the *source upload's* metadata, so after
+the download the ID3 tags are rewritten from Spotify's data: title, artists,
+album, album artist, year, track number and an embedded cover. Metadata comes
+from Spotify's public embed JSON (~200 ms); `spotdl save` (~24 s) is only used
+for the album fields, and runs *alongside* the download so it costs no extra
+wall time.
+
 ### Signed-in sites (cookies)
 
 Some sites only release media to a signed-in browser — X in particular returns

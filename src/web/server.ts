@@ -18,8 +18,9 @@ import {fileURLToPath} from 'node:url'
 import {buildChoices, download, ensureYtDlp, findFfmpeg, probe, type DownloadChoice} from '../lib/ytdlp.js'
 import {isProbablyUrl} from '../lib/platforms.js'
 import {CookieStore, KNOWN_SITES, siteForUrl} from './cookies.js'
-import {isSpotifyUrl, lookupSpotify} from './spotify.js'
+import {enrichAlbumFields, isSpotifyUrl, lookupSpotify} from './spotify.js'
 import {resolveAudioSource} from './audio-sources.js'
+import {applyTags} from './tagging.js'
 import type {SpotifyTrack} from './spotify.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -86,6 +87,13 @@ async function cookiesFor(url: string): Promise<string | undefined> {
 }
 
 type JobStatus = 'queued' | 'downloading' | 'processing' | 'done' | 'error' | 'cancelled'
+
+/** The single format offered for Spotify tracks (always mp3). */
+const AUDIO_CHOICE: DownloadChoice = {
+  label: 'audio only · mp3',
+  kind: 'audio',
+  args: ['-f', 'ba/b', '-x', '--audio-format', 'mp3', '--audio-quality', '0'],
+}
 
 type Job = {
   id: string
@@ -293,6 +301,13 @@ function startJob(job: Job): void {
       job.status = 'downloading'
       const outDir = path.join(WORK_DIR, job.id)
       await fs.mkdir(outDir, {recursive: true})
+
+      // Album columns are only available from the slow spotdl path. Start it
+      // alongside the download so its cost hides behind the transfer, and it
+      // has finished by the time tagging runs.
+      const albumWork = job.spotify && !job.spotify.album
+        ? enrichAlbumFields(job.spotify, path.join(WORK_DIR, '.tmp'))
+        : Promise.resolve(job.spotify)
       const filepath = await download(
         {
           ytdlp: ytdlpPath,
@@ -323,6 +338,27 @@ function startJob(job: Job): void {
         },
         job.abort.signal,
       )
+      // Spotify: the audio carries the source site's metadata, not the track's.
+      if (job.spotify) {
+        job.spotify = (await albumWork) ?? job.spotify
+        job.status = 'processing'
+        const result = await applyTags(
+          filepath,
+          {
+            title: job.spotify.name,
+            artists: job.spotify.artists?.length ? job.spotify.artists : [job.spotify.artist],
+            album: job.spotify.album,
+            albumArtist: job.spotify.albumArtist ?? job.spotify.artist,
+            year: job.spotify.year,
+            trackNumber: job.spotify.trackNumber,
+            coverUrl: job.spotify.cover,
+            source: 'Spotify',
+          },
+          path.join(WORK_DIR, '.tmp'),
+        )
+        if (!result.ok) console.error(`tagging ${job.id} failed:`, result.reason?.slice(0, 200))
+      }
+
       const stat = await fs.stat(filepath)
       job.filepath = filepath
       job.filename = safeFilename(filepath, job.choice.kind === 'audio' ? '.mp3' : '.mp4')
@@ -448,8 +484,21 @@ async function handleDownload(body: Record<string, unknown>) {
     const title = typeof body.title === 'string' ? body.title : ''
     const artist = typeof body.artist === 'string' ? body.artist : ''
     const knownUrl = typeof body.audioUrl === 'string' ? body.audioUrl : ''
-    if (title && artist) spotify = {id: '', name: title, artist, url}
-    else spotify = await lookupSpotify(url, path.join(WORK_DIR, '.tmp'))
+    if (title && artist) {
+      // The client echoes what the probe returned, which saves a 24s spotdl
+      // call — but it only sends title/artist, so fill the tagging fields from
+      // the cached lookup when available, and never lose them.
+      const cached = await lookupSpotify(url, path.join(WORK_DIR, '.tmp')).catch(() => undefined)
+      spotify = {
+        ...(cached ?? {}),
+        id: cached?.id ?? '',
+        name: title,
+        artist,
+        url,
+      } as SpotifyTrack
+    } else {
+      spotify = await lookupSpotify(url, path.join(WORK_DIR, '.tmp'))
+    }
 
     // Reuse the exact source the probe validated; re-searching here could land
     // on a different, blocked video.
@@ -466,14 +515,23 @@ async function handleDownload(body: Record<string, unknown>) {
     }
   }
 
-  // Re-probe so the choice index can't be forged into arbitrary yt-dlp args.
-  const {info} = await probe(ytdlpPath, searchUrl, {
-    cookiesFile: await cookiesFor(searchUrl),
-    saveInfo: false,
-    signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-  })
-  const choices = buildChoices(info)
-  const choice = spotify ? choices[choices.length - 1] : choices[index]
+  let choice: DownloadChoice | undefined
+  let videoTitle = 'Untitled'
+
+  if (spotify) {
+    // Already validated at probe time and there is only one possible format, so
+    // re-probing here would add ~5s and buy nothing.
+    choice = AUDIO_CHOICE
+  } else {
+    // Re-probe so the choice index can't be forged into arbitrary yt-dlp args.
+    const {info} = await probe(ytdlpPath, searchUrl, {
+      cookiesFile: await cookiesFor(searchUrl),
+      saveInfo: false,
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    })
+    choice = buildChoices(info)[index]
+    videoTitle = info.title ?? 'Untitled'
+  }
   if (!choice) throw new HttpError(400, 'That format is no longer offered for this link.')
 
   const used = await dirSize(WORK_DIR)
@@ -489,7 +547,7 @@ async function handleDownload(body: Record<string, unknown>) {
     url: searchUrl,
     spotify,
     choice,
-    title: spotify ? `${spotify.name} - ${spotify.artist}` : (info.title ?? 'Untitled'),
+    title: spotify ? `${spotify.name} - ${spotify.artist}` : videoTitle,
     status: 'queued',
     downloadedBytes: 0,
     bytesOnDisk: 0,
