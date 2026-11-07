@@ -101,12 +101,12 @@ export const api = {
   download: (params: {
     url: string
     choice: number
+    /** The label shown to the user; parsed server-side into fixed yt-dlp args. */
+    choiceLabel?: string
     retentionHours: number
     title?: string
     artist?: string
     audioUrl?: string
-  /** Same-origin, browser-playable stream for the player. */
-  previewUrl?: string
   }) => request<{ job: Job }>("/api/download", { method: "POST", body: JSON.stringify(params) }),
 
   job: (id: string) => request<Job>(`/api/jobs/${id}`),

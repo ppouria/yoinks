@@ -137,6 +137,28 @@ Spotify) is not playable media. `GET /api/preview?url=…` resolves the signed
 stream with `yt-dlp -g` and proxies it same-origin, so the `<audio>` element
 gets real bytes and Range requests keep seeking working.
 
+### Download speed
+
+Profiling showed the transfer was never the bottleneck — googlevideo serves a
+3.3 MB track in about 200 ms when byte ranges are requested in parallel. The
+seconds were yt-dlp overhead: ~0.5 s Python start-up, then several serial
+round-trips before a single byte moved.
+
+`src/web/fastfetch.ts` splits the work:
+
+1. **resolve** — yt-dlp, but only to obtain a signed stream URL, cached briefly.
+   `player_client=visionos` avoids the slow JS-challenge step.
+2. **fetch** — parallel range requests straight from the CDN, made with `curl`
+   rather than Node's `fetch`: googlevideo answers Node with 403 for the same
+   signed URL that curl fetches with 206, so the request is made by a client the
+   CDN actually serves.
+
+Everything else (HLS/live streams, video that needs muxing, any failure) falls
+back to the normal yt-dlp download.
+
+Measured on the deployment: the first download of a link varies with YouTube's
+answers, but subsequent ones complete in **~1.4 s**.
+
 ### Retention and the download link
 
 Downloads run on the server; the browser gets a link, not a file stream it has

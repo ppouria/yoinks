@@ -22,6 +22,7 @@ import {CookieStore, KNOWN_SITES, siteForUrl} from './cookies.js'
 import {enrichAlbumFields, isSpotifyUrl, lookupSpotify} from './spotify.js'
 import {resolveAudioSource} from './audio-sources.js'
 import {applyTags} from './tagging.js'
+import {fetchParallel, resolveStream, StreamExpiredError, invalidateStream, supportsFastPath} from './fastfetch.js'
 import type {SpotifyTrack} from './spotify.js'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -89,6 +90,25 @@ async function cookiesFor(url: string): Promise<string | undefined> {
 
 type JobStatus = 'queued' | 'downloading' | 'processing' | 'done' | 'error' | 'cancelled'
 
+
+/**
+ * Turn a label the UI showed ("720p · mp4", "audio only · mp3") back into a
+ * fixed, known-good argument set. Anything unrecognised returns undefined, so
+ * a tampered request can never smuggle options into yt-dlp.
+ */
+function choiceFromLabel(label: string): DownloadChoice | undefined {
+  if (/^\s*audio only/i.test(label)) return AUDIO_CHOICE
+  const match = /^\s*(\d{3,4})p\b/.exec(label)
+  if (!match) return undefined
+  const height = Number(match[1])
+  if (!Number.isInteger(height) || height < 144 || height > 4320) return undefined
+  return {
+    kind: 'video',
+    label: `${height}p · mp4`,
+    args: ['-f', `bv*[height=${height}]+ba/b[height=${height}]/bv*[height<=${height}]+ba/b`, '--merge-output-format', 'mp4'],
+  }
+}
+
 /** The single format offered for Spotify tracks (always mp3). */
 const AUDIO_CHOICE: DownloadChoice = {
   label: 'audio only · mp3',
@@ -102,6 +122,8 @@ type Job = {
   url: string
   /** Set when the job originated from a Spotify link. */
   spotify?: SpotifyTrack
+  /** Basename (no extension) used for the finished file. */
+  baseName?: string
   choice: DownloadChoice
   title: string
   status: JobStatus
@@ -296,6 +318,52 @@ async function sampleBytesOnDisk(job: Job): Promise<void> {
   }
 }
 
+/**
+ * Resolve + range-fetch a direct stream. Returns the written path, or throws so
+ * the caller can fall back to yt-dlp.
+ *
+ * Only used for audio/muxed single-file streams: a video+audio merge still
+ * needs ffmpeg, which is yt-dlp's job.
+ */
+async function tryFastDownload(job: Job, outDir: string, wantAudio: boolean, label: string): Promise<string> {
+  // Video+audio merging needs ffmpeg, so only a progressive (muxed) format is
+  // eligible. That is exactly what yt-dlp's `b` picks, and `-g` will say so.
+  const stream = await resolveStream(ytdlpPath, job.url, {
+    cookiesFile: await cookiesFor(job.url),
+    preferAudio: wantAudio,
+    height: wantAudio ? undefined : Number(/^(\d{3,4})p/.exec(label)?.[1]) || undefined,
+  })
+
+  const ext =
+    stream.mime?.includes('webm') ? (wantAudio ? 'webm' : 'webm')
+    : stream.mime?.includes('mp4') ? (wantAudio ? 'm4a' : 'mp4')
+    : stream.mime?.includes('mpeg') || stream.mime?.includes('mp3') ? 'mp3'
+    : wantAudio ? 'webm' : 'mp4'
+  const base = safeFilename(`${job.baseName ?? job.title ?? 'audio'}.${ext}`, `.${ext}`)
+  const target = path.join(outDir, base)
+
+  job.status = 'downloading'
+  job.totalParts = 1
+  job.part = 0
+  const startedAt = Date.now()
+
+  await fetchParallel(stream.url, target, {
+    signal: job.abort.signal,
+    onProgress: (downloaded, total) => {
+      job.downloadedBytes = downloaded
+      job.totalBytes = total || stream.size
+      const elapsed = (Date.now() - startedAt) / 1000
+      if (elapsed > 0.1) {
+        job.speed = downloaded / elapsed
+        const remaining = job.totalBytes ? job.totalBytes - downloaded : 0
+        job.eta = job.speed > 0 ? remaining / job.speed : undefined
+      }
+    },
+  })
+
+  return target
+}
+
 function startJob(job: Job): void {
   void (async () => {
     try {
@@ -309,7 +377,33 @@ function startJob(job: Job): void {
       const albumWork = job.spotify && !job.spotify.album
         ? enrichAlbumFields(job.spotify, path.join(WORK_DIR, '.tmp'))
         : Promise.resolve(job.spotify)
-      const filepath = await download(
+      // Fast path: for direct-file sources, resolve the signed URL once and
+      // pull it with parallel ranges. Falls through to yt-dlp for everything
+      // else (HLS, sites without a direct stream, or any failure here).
+      let filepath: string
+      const wantAudio = job.choice.kind === 'audio'
+      const attemptFast = (): Promise<string> =>
+        tryFastDownload(job, outDir, wantAudio, job.choice.label).catch(async error => {
+          if (error instanceof StreamExpiredError) {
+            // One retry with a freshly signed URL; a stale cache entry is
+            // exactly the case this exists for.
+            invalidateStream(job.url)
+            return tryFastDownload(job, outDir, wantAudio, job.choice.label)
+          }
+          throw error
+        })
+
+      const fast = supportsFastPath(job.url)
+        ? await attemptFast().catch(error => {
+            console.log(`fast path unavailable for ${job.id}:`, (error as Error).message.slice(0, 120))
+            return undefined
+          })
+        : undefined
+
+      if (fast) {
+        filepath = fast
+      } else {
+      filepath = await download(
         {
           ytdlp: ytdlpPath,
           ffmpegLocation,
@@ -339,6 +433,7 @@ function startJob(job: Job): void {
         },
         job.abort.signal,
       )
+      }
       // Spotify: the audio carries the source site's metadata, not the track's.
       if (job.spotify) {
         job.spotify = (await albumWork) ?? job.spotify
@@ -477,7 +572,9 @@ async function handleProbe(body: Record<string, unknown>) {
 async function handleDownload(body: Record<string, unknown>) {
   const url = assertUrl(body.url)
   const index = Number(body.choice)
-  if (!Number.isInteger(index) || index < 0) throw new HttpError(400, 'Pick a format first.')
+  const hasLabel = typeof body.choiceLabel === 'string' && body.choiceLabel.trim() !== ''
+  if (!hasLabel && (!Number.isInteger(index) || index < 0)) throw new HttpError(400, 'Pick a format first.')
+  const safeIndex = Number.isInteger(index) && index >= 0 ? index : 0
   const retention = retentionMs(body.retentionHours)
 
   // Spotify track: the probe told the client to send it back, so we do not
@@ -527,14 +624,24 @@ async function handleDownload(body: Record<string, unknown>) {
     // re-probing here would add ~5s and buy nothing.
     choice = AUDIO_CHOICE
   } else {
-    // Re-probe so the choice index can't be forged into arbitrary yt-dlp args.
-    const {info} = await probe(ytdlpPath, searchUrl, {
-      cookiesFile: await cookiesFor(searchUrl),
-      saveInfo: false,
-      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-    })
-    choice = buildChoices(info)[index]
-    videoTitle = info.title ?? 'Untitled'
+    // The browser echoes back the label it was shown, e.g. "720p · mp4".
+    // Rebuilding the yt-dlp arguments from *that* — instead of re-probing —
+    // keeps the request instant while still refusing a forged format index:
+    // the label is parsed into a fixed set of specs, never passed through.
+    const requested = typeof body.choiceLabel === 'string' ? body.choiceLabel : ''
+    choice = choiceFromLabel(requested)
+    if (!choice) {
+      // Fallback for old clients: one probe, which is what this used to do.
+      const {info} = await probe(ytdlpPath, searchUrl, {
+        cookiesFile: await cookiesFor(searchUrl),
+        saveInfo: false,
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      })
+      choice = buildChoices(info)[safeIndex]
+      videoTitle = info.title ?? 'Untitled'
+    } else if (typeof body.title === 'string' && body.title.trim()) {
+      videoTitle = body.title.trim().slice(0, 300)
+    }
   }
   if (!choice) throw new HttpError(400, 'That format is no longer offered for this link.')
 
@@ -559,6 +666,9 @@ async function handleDownload(body: Record<string, unknown>) {
     totalParts: 1,
     createdAt: Date.now(),
     retentionHours: retention.hours,
+    baseName: spotify
+      ? safeFilename(`${spotify.artist} - ${spotify.name}`, '.mp3').replace(/\.mp3$/, '')
+      : undefined,
     abort: new AbortController(),
   }
   jobs.set(job.id, job)
