@@ -3,3 +3,10 @@ dist/
 *.log
 .DS_Store
 .claude/
+
+# shadcn/Vite app: dependencies, build output, editor state
+webapp/webapp/node_modules/
+webapp/webapp/dist/
+webapp/dist-app/
+webapp/webapp/.vite/
+webapp/webapp/src/assets/react.svg

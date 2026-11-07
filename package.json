@@ -13,14 +13,16 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && npm run build:web",
     "dev": "tsup --watch",
     "test": "tsx --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "start": "node dist/cli.js",
     "prepublishOnly": "npm test && npm run typecheck && npm run build",
     "web": "node dist/web/server.js",
-    "web:dev": "YOINKS_WEB_NO_AUTOSTART= tsx src/web/server.ts"
+    "web:dev": "YOINKS_WEB_NO_AUTOSTART= tsx src/web/server.ts",
+    "build:web": "cd webapp/webapp && npx vite build",
+    "dev:web": "cd webapp/webapp && npx vite"
   },
   "author": "Pablo Stanley",
   "keywords": [

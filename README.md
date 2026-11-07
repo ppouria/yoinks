@@ -114,6 +114,29 @@ panel that terminates TLS.
 A download never blocks a request: the client polls the job. Finished files
 are served from disk and deleted an hour after they complete.
 
+### Frontend
+
+The UI is a shadcn/ui (Base UI + Tailwind v4) SPA in `webapp/webapp`, built into
+`dist/web/public` so the Node server serves it:
+
+```sh
+npm install
+cd webapp/webapp && npm install && cd ../..
+
+npm run build       # tsup + vite  → dist/web/server.js + dist/web/public
+npm run web         # http://127.0.0.1:3000
+npm run dev:web     # Vite dev server; proxies /api to YOINKS_API (default :3017)
+```
+
+Paste a link and the player appears: cover, title, artist, seek bar, ±10s,
+volume. Play it while the server copy is being made, then the download button
+and shareable link appear underneath when it is ready.
+
+Playing needs a browser-reachable stream, and a source *page* URL (YouTube,
+Spotify) is not playable media. `GET /api/preview?url=…` resolves the signed
+stream with `yt-dlp -g` and proxies it same-origin, so the `<audio>` element
+gets real bytes and Range requests keep seeking working.
+
 ### Retention and the download link
 
 Downloads run on the server; the browser gets a link, not a file stream it has

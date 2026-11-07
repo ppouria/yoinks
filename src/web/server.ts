@@ -9,6 +9,7 @@
  * Runtime contract (Rebecca's Node.js external-app unit relies on it):
  *   listen on process.env.PORT at process.env.HOST, entry `npm run start`.
  */
+import {spawn} from 'node:child_process'
 import {createServer, type IncomingMessage, type ServerResponse} from 'node:http'
 import {createReadStream} from 'node:fs'
 import fs from 'node:fs/promises'
@@ -429,6 +430,9 @@ async function handleProbe(body: Record<string, unknown>) {
       spotify: track,
       source: 'spotify',
       audioUrl: source.url,
+      // Playable, same-origin stream for the player (the raw source URL is a
+      // web page the browser cannot play).
+      previewUrl: `/api/preview?url=${encodeURIComponent(source.url)}`,
       choices: [{index: 0, label: 'audio only · mp3', kind: 'audio'}],
     }
   }
@@ -598,6 +602,93 @@ async function handleFile(job: Job, req: IncomingMessage, res: ServerResponse) {
   createReadStream(job.filepath).pipe(res)
 }
 
+/**
+ * Browsers cannot play a YouTube *page* URL — the media lives on googlevideo and
+ * needs a signed, expiring stream URL. `yt-dlp -g` produces exactly that, and
+ * this endpoint proxies it so the <audio> element has same-origin media.
+ *
+ * Stream URLs expire (a few hours) and are IP-bound, so they are resolved on
+ * demand and cached only briefly.
+ */
+const streamCache = new Map<string, {url: string; at: number}>()
+const STREAM_TTL_MS = 30 * 60 * 1000
+
+async function resolveStreamUrl(target: string): Promise<string> {
+  const cached = streamCache.get(target)
+  if (cached && Date.now() - cached.at < STREAM_TTL_MS) return cached.url
+
+  const args = ['-g', '-f', 'ba/b', '--no-playlist', '--no-warnings']
+  const cookiesFile = await cookiesFor(target)
+  if (cookiesFile) args.push('--cookies', cookiesFile)
+  args.push(target)
+
+  const url = await new Promise<string>((resolve, reject) => {
+    const child = spawn(ytdlpPath, args, {signal: AbortSignal.timeout(45_000)})
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (chunk: Buffer) => (out += chunk))
+    child.stderr.on('data', (chunk: Buffer) => (err += chunk))
+    child.on('error', reject)
+    child.on('close', code => {
+      const first = out.split('\n').map(line => line.trim()).find(line => line.startsWith('http'))
+      if (code === 0 && first) resolve(first)
+      else reject(new Error(err.trim().split('\n').at(-1) || `yt-dlp exited with ${code}`))
+    })
+  })
+
+  streamCache.set(target, {url, at: Date.now()})
+  return url
+}
+
+/** Streams the upstream media to the browser, forwarding Range requests. */
+async function handlePreview(target: string, req: IncomingMessage, res: ServerResponse) {
+  if (streamCache.size > 200) streamCache.clear()
+  const media = await resolveStreamUrl(target)
+
+  const upstream = await new Promise<{status: number; headers: Headers; body: AsyncIterable<Uint8Array> | null}>(
+    async (resolve, reject) => {
+      const controller = new AbortController()
+      req.on('close', () => controller.abort())
+      try {
+        const response = await fetch(media, {
+          headers: {
+            ...(req.headers.range ? {range: String(req.headers.range)} : {}),
+            'user-agent': 'Mozilla/5.0',
+          },
+          signal: controller.signal,
+        })
+        if (!response.ok || !response.body) {
+          reject(new Error(`Upstream media returned ${response.status}.`))
+          return
+        }
+        resolve({status: response.status, headers: response.headers, body: response.body as never})
+      } catch (error) {
+        reject(error)
+      }
+    },
+  )
+
+  const headers: Record<string, string> = {
+    'content-type': upstream.headers.get('content-type') ?? 'audio/webm',
+    'accept-ranges': 'bytes',
+    'cache-control': 'no-store',
+  }
+  for (const name of ['content-length', 'content-range']) {
+    const value = upstream.headers.get(name)
+    if (value) headers[name] = value
+  }
+  res.writeHead(upstream.status, headers)
+
+  try {
+    for await (const chunk of upstream.body ?? []) {
+      if (!res.write(chunk)) await new Promise(resolve => res.once('drain', resolve))
+    }
+  } catch {
+    // client navigated away or upstream stalled; nothing to recover
+  }
+  res.end()
+}
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -681,6 +772,12 @@ const server = createServer((req, res) => {
           console.log(`cookies: removed jar for ${key}`)
           return json(res, 200, {ok: true})
         }
+      }
+
+      if (pathname === '/api/preview' && method === 'GET') {
+        const target = url.searchParams.get('url')?.trim()
+        if (!target || !isProbablyUrl(target)) throw new HttpError(400, 'A valid url is required.')
+        return await handlePreview(target, req, res)
       }
 
       if (pathname === '/api/info' && method === 'POST') return json(res, 200, await handleProbe(await readJson(req)))
