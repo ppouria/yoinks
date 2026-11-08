@@ -25,5 +25,23 @@ export default defineConfig([
     // app would otherwise have to install (and keep updated) on the server.
     external: ['ffmpeg-static'],
     noExternal: ['teleproto'],
+    // teleproto (and the CJS it pulls in) calls require('buffer') at runtime.
+    // In an ESM bundle that becomes a shim that throws; give the chunk a
+    // working require so those calls resolve to Node's builtin.
+    esbuildOptions(options, context) {
+      if (context.format === 'esm') {
+        options.banner = {
+          // Some bundled CJS also reads __filename/__dirname, which ESM lacks.
+          js: [
+            "import{createRequire as __cr}from'node:module';",
+            "import{fileURLToPath as __ftp}from'node:url';",
+            "import{dirname as __dn}from'node:path';",
+            "const require=__cr(import.meta.url);",
+            "const __filename=__ftp(import.meta.url);",
+            "const __dirname=__dn(__filename);",
+          ].join(''),
+        }
+      }
+    },
   },
 ])
