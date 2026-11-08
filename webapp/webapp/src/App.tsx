@@ -94,6 +94,11 @@ export function App() {
     setUrl("")
   }, [])
 
+  /**
+   * Paste and go: one request resolves the link *and* starts the download, so
+   * the transfer begins immediately instead of waiting for a second click.
+   * The format picker stays available afterwards for re-downloads.
+   */
   const probe = async (event?: React.FormEvent) => {
     event?.preventDefault()
     const trimmed = url.trim()
@@ -102,11 +107,11 @@ export function App() {
     setProbeError(null)
     setJob(null)
     try {
-      const result = await api.probe(trimmed)
-      setInfo(result)
-      // Audio is the common case for a music downloader; preselect it when present.
+      const { job: started, info: result } = await api.grab({ url: trimmed, retentionHours: retention })
       const audioIndex = result.choices.findIndex((c) => c.kind === "audio")
+      setInfo(result)
       setChoice(audioIndex >= 0 ? audioIndex : 0)
+      setJob(started)
     } catch (error) {
       setInfo(null)
       setProbeError(error instanceof Error ? error.message : "That link could not be read.")
@@ -255,7 +260,7 @@ export function App() {
             </Card>
           ) : null}
 
-          {!job || job.status === "error" ? (
+          {!saving && (!job || job.status === "error") ? (
             <Card>
               <CardHeader>
                 <CardTitle className="text-sm">Download</CardTitle>

@@ -357,14 +357,20 @@ export async function fetchParallel(streamUrl: string, outPath: string, opts: Fe
   const chunk = Math.ceil(total / connections)
   const parts: string[] = []
 
+  // These must run concurrently: awaiting each range in turn made the fetch
+  // as slow as a single sequential download, which defeated the whole point.
+  const ranges: Array<{start: number; end: number; part: string}> = []
   for (let index = 0; index < connections; index++) {
     const start = index * chunk
     if (start >= total) break
-    const end = Math.min(start + chunk - 1, total - 1)
-    const part = `${outPath}.part${index}`
-    parts.push(part)
-    await curlRange(streamUrl, `${start}-${end}`, part, opts.signal)
+    ranges.push({
+      start,
+      end: Math.min(start + chunk - 1, total - 1),
+      part: `${outPath}.part${index}`,
+    })
   }
+  parts.push(...ranges.map(range => range.part))
+  await Promise.all(ranges.map(range => curlRange(streamUrl, `${range.start}-${range.end}`, range.part, opts.signal)))
 
   // Each range landed in its own file; joining them in order is the file.
   const handle = await fs.open(outPath, 'w')

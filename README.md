@@ -137,6 +137,16 @@ Spotify) is not playable media. `GET /api/preview?url=…` resolves the signed
 stream with `yt-dlp -g` and proxies it same-origin, so the `<audio>` element
 gets real bytes and Range requests keep seeking working.
 
+### Paste and go
+
+Pasting a link starts the download immediately — one `POST /api/grab` resolves
+the link and creates the job, so there is no "load, then save" round trip. The
+player appears as soon as metadata is known (~0.5s) and the finished file with
+its download button lands a couple of seconds later.
+
+`POST /api/info` + `POST /api/download` remain available separately for clients
+that want to show a format picker before committing.
+
 ### Deezer (fastest audio source)
 
 Deezer is the only source that returns a plain CDN file after a single API call

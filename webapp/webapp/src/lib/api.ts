@@ -113,6 +113,13 @@ export const api = {
 
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
 
+  /** Resolve a link and start downloading it in one round-trip. */
+  grab: (params: {url: string; retentionHours: number; choice?: number; choiceLabel?: string}) =>
+    request<{job: Job; info: ProbeResult}>("/api/grab", {
+      method: "POST",
+      body: JSON.stringify(params),
+    }),
+
   cancel: (id: string) => request<{ ok: true }>(`/api/jobs/${id}`, { method: "DELETE" }),
 
   fileUrl: (id: string) => `${BASE}/api/jobs/${id}/file`,

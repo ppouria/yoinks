@@ -2,15 +2,13 @@
  * Deezer as the primary audio source.
  *
  * Why Deezer: it is the only source here that hands back a plain CDN file after
- * a single API call. No yt-dlp, no JS challenge, no manifest — which is what
- * makes a download take ~1s instead of ~20s. The protocol work lives in
- * deezer_bridge.py (deezer-py); this file just runs it and normalises results.
+ * a single API call. No yt-dlp, no JS challenge, no manifest.
  *
- * A free Deezer account is enough (128 kbps mp3). Without a session Deezer only
- * serves 30-second previews, which are never treated as a usable match — the
- * caller falls back to the YouTube path in that case.
+ * The protocol work lives in deezer_bridge.py (deezer-py), which runs as a
+ * long-lived worker. Spawning Python per request cost ~0.4s of start-up and a
+ * re-login every time; the worker keeps the session warm and answers in ~0.3s.
  */
-import {execFile} from 'node:child_process'
+import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import {fileURLToPath} from 'node:url'
@@ -19,8 +17,6 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 /** The script ships next to the bundle (see the tsup copy step). */
 const BRIDGE = path.join(HERE, 'deezer_bridge.py')
 const PYTHON = process.env.YOINKS_PYTHON || 'python3'
-/** Read from the cookie store, injected by the server per request. */
-const ARL_ENV = 'DEEZER_ARL'
 
 export type DeezerTrack = {
   id: string
@@ -33,28 +29,77 @@ export type DeezerTrack = {
 export type DeezerResult = {track: DeezerTrack; url: string}
 
 type BridgeReply = {
+  id?: number
   ok: boolean
   error?: string
   track?: {id?: string; title?: string; artist?: string; album?: string; duration?: number}
   url?: string
 }
 
-function callBridge(request: unknown, arl: string, timeoutMs = 30_000): Promise<BridgeReply> {
-  return new Promise((resolve, reject) => {
-    const child = execFile(
-      PYTHON,
-      [BRIDGE],
-      {timeout: timeoutMs, env: {...process.env, [ARL_ENV]: arl}},
-      (error, stdout, stderr) => {
-        // The bridge always prints JSON, even on failure.
-        try {
-          resolve(JSON.parse(stdout) as BridgeReply)
-        } catch {
-          reject(new Error(stderr.trim() || error?.message || 'Deezer bridge failed'))
+type Pending = {resolve: (value: BridgeReply) => void; reject: (error: Error) => void; timer: NodeJS.Timeout}
+
+/** One worker for the whole server; restarted if it dies. */
+let worker: ChildProcessWithoutNullStreams | undefined
+let buffer = ''
+let nextId = 1
+const pending = new Map<number, Pending>()
+
+function startWorker(): ChildProcessWithoutNullStreams {
+  const child = spawn(PYTHON, [BRIDGE], {stdio: ['pipe', 'pipe', 'pipe']})
+
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (chunk: string) => {
+    buffer += chunk
+    let newline = buffer.indexOf('\n')
+    while (newline >= 0) {
+      const line = buffer.slice(0, newline).trim()
+      buffer = buffer.slice(newline + 1)
+      newline = buffer.indexOf('\n')
+      if (!line) continue
+      try {
+        const reply = JSON.parse(line) as BridgeReply
+        const waiter = reply.id !== undefined ? pending.get(reply.id) : undefined
+        if (waiter) {
+          clearTimeout(waiter.timer)
+          pending.delete(reply.id!)
+          waiter.resolve(reply)
         }
-      },
-    )
-    child.stdin?.end(JSON.stringify(request))
+      } catch {
+        // a stray line from the worker; ignore rather than killing it
+      }
+    }
+  })
+
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (chunk: string) => {
+    const text = chunk.trim()
+    if (text) console.log(`[deezer] ${text.slice(0, 200)}`)
+  })
+
+  const failAll = () => {
+    for (const [, waiter] of pending) {
+      clearTimeout(waiter.timer)
+      waiter.reject(new Error('Deezer worker stopped'))
+    }
+    pending.clear()
+    if (worker === child) worker = undefined
+  }
+  child.on('exit', failAll)
+  child.on('error', failAll)
+
+  return child
+}
+
+function callBridge(request: Record<string, unknown>, arl: string, timeoutMs = 25_000): Promise<BridgeReply> {
+  if (!worker || worker.killed) worker = startWorker()
+  const id = nextId++
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pending.delete(id)
+      reject(new Error('Deezer timed out'))
+    }, timeoutMs)
+    pending.set(id, {resolve, reject, timer})
+    worker!.stdin.write(`${JSON.stringify({id, arl, ...request})}\n`)
   })
 }
 
@@ -67,8 +112,7 @@ function normalise(reply: BridgeReply): DeezerResult {
       title: track.title ?? 'Unknown title',
       artist: track.artist ?? 'Unknown artist',
       album: track.album,
-      // Deezer sends duration as a string ("239"); everything downstream does
-      // arithmetic on it.
+      // Deezer sends duration as a string; everything downstream does arithmetic.
       duration: Number(track.duration) || undefined,
     },
     url: reply.url,
@@ -95,7 +139,6 @@ export function deezerTrackId(rawUrl: string): string | undefined {
   }
 }
 
-/** "Artist - Title" for a Spotify track, so Deezer can be tried first. */
 export async function searchDeezer(query: string, arl: string): Promise<DeezerResult> {
   if (!arl) throw new Error('No Deezer session configured.')
   return normalise(await callBridge({op: 'search', query}, arl))
@@ -114,4 +157,10 @@ export async function deezerAvailable(): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/** Stop the worker on shutdown so no orphan Python is left behind. */
+export function stopDeezer(): void {
+  worker?.kill()
+  worker = undefined
 }

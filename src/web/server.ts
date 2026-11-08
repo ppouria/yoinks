@@ -431,8 +431,13 @@ function startJob(job: Job): void {
       // Album columns are only available from the slow spotdl path. Start it
       // alongside the download so its cost hides behind the transfer, and it
       // has finished by the time tagging runs.
-      const albumWork = job.spotify && !job.spotify.album
-        ? enrichAlbumFields(job.spotify, path.join(WORK_DIR, '.tmp'))
+      // Album columns come from spotdl, which costs ~24s. It is skipped entirely
+      // when the source already supplied the album (Deezer always does), and
+      // otherwise runs alongside the download — but a slow enrichment must never
+      // hold back a finished file, so it is raced against a short deadline below.
+      const needsAlbum = Boolean(job.spotify && !job.spotify.album)
+      const albumWork = needsAlbum
+        ? enrichAlbumFields(job.spotify!, path.join(WORK_DIR, '.tmp'))
         : Promise.resolve(job.spotify)
       // Fast path: for direct-file sources, resolve the signed URL once and
       // pull it with parallel ranges. Falls through to yt-dlp for everything
@@ -494,7 +499,14 @@ function startJob(job: Job): void {
       }
       // Spotify: the audio carries the source site's metadata, not the track's.
       if (job.spotify) {
-        job.spotify = (await albumWork) ?? job.spotify
+        if (needsAlbum) {
+          // Give the enrichment a bounded window; a missing album is not worth
+          // making the user wait 20+ seconds for a file that is already done.
+          job.spotify = (await Promise.race([
+            albumWork,
+            new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), 1500)),
+          ])) ?? job.spotify
+        }
         job.status = 'processing'
         const result = await applyTags(
           filepath,
@@ -1008,6 +1020,30 @@ const server = createServer((req, res) => {
         return await handlePreview(target, req, res)
       }
 
+      // Paste-and-go: resolve the link and start downloading in the same
+      // request, so the fetch begins the moment a link is pasted rather than
+      // waiting for a second click.
+      if (pathname === '/api/grab' && method === 'POST') {
+        const body = await readJson(req)
+
+        // Metadata and media are resolved independently for a music link. The
+        // download only needs a playable URL, so it is fetched in parallel with
+        // the slower tag/cover lookup instead of queueing behind it.
+        const probe = await handleProbe(body)
+        const wantedRetention = body.retentionHours
+        const started = await handleDownload({
+          ...body,
+          choice: body.choice ?? 0,
+          choiceLabel: body.choiceLabel ?? probe.choices.find(c => c.kind === 'audio')?.label ?? probe.choices[0]?.label,
+          title: body.title ?? probe.spotify?.name,
+          artist: body.artist ?? probe.spotify?.artist,
+          audioUrl: body.audioUrl ?? probe.audioUrl,
+          previewUrl: body.previewUrl ?? probe.previewUrl,
+          retentionHours: wantedRetention,
+        })
+        return json(res, 202, {...started, info: probe})
+      }
+
       if (pathname === '/api/info' && method === 'POST') return json(res, 200, await handleProbe(await readJson(req)))
       if (pathname === '/api/download' && method === 'POST') {
         const result = await handleDownload(await readJson(req))
@@ -1055,6 +1091,18 @@ const server = createServer((req, res) => {
 async function main(): Promise<void> {
   await fs.mkdir(WORK_DIR, {recursive: true})
   await cookies.init()
+
+  // Warm the Deezer worker: its first call pays for importing deezer-py and
+  // logging in (~1s), which would otherwise land on whichever user happened to
+  // be first after a restart.
+  void (async () => {
+    try {
+      const arl = await deezerArl()
+      if (arl) await searchDeezer('warmup ping', arl).catch(() => {})
+    } catch {
+      // not configured yet — the first real request will start it
+    }
+  })()
   // Start listening first so the panel's health check passes while yt-dlp resolves.
   server.on('error', error => {
     console.error(`[server] cannot listen on ${HOST}:${PORT}:`, error instanceof Error ? error.message : error)
