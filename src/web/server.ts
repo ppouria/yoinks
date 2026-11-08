@@ -23,6 +23,7 @@ import {enrichAlbumFields, isSpotifyUrl, lookupSpotify} from './spotify.js'
 import {resolveAudioSource} from './audio-sources.js'
 import {deezerTrackId, deezerTrackMedia, downloadDeezerAudio, isDeezerUrl, searchDeezer} from './deezer.js'
 import {raceAudioSources} from './source-race.js'
+import {downloadHls} from './hls.js'
 import {startTelegramBot, telegramConfigured} from './telegram.js'
 import {applyTags} from './tagging.js'
 import {
@@ -243,6 +244,17 @@ async function readCookieUpload(req: IncomingMessage): Promise<string> {
   return text
 }
 
+/**
+ * Is this link really a music track? Spotify/Deezer always are, and a source
+ * whose formats are all containers with no video track (SoundCloud) should be
+ * treated as audio too, even though yt-dlp labels its only format "video".
+ */
+function isMusicLink(probe: {source?: string; extractor?: string}): boolean {
+  if (probe.source === 'spotify' || probe.source === 'deezer') return true
+  const extractor = (probe.extractor ?? '').toLowerCase()
+  return extractor.includes('soundcloud') || extractor.includes('bandcamp')
+}
+
 function assertUrl(value: unknown): string {
   const url = typeof value === 'string' ? value.trim() : ''
   if (!url || !isProbablyUrl(url)) throw new HttpError(400, "That doesn’t look like a link — paste a full http(s) URL.")
@@ -382,7 +394,8 @@ async function tryFastDownload(job: Job, outDir: string, wantAudio: boolean, lab
       })
 
   const ext =
-    stream.mime?.includes('webm') ? (wantAudio ? 'webm' : 'webm')
+    stream.isHls ? 'ts'
+    : stream.mime?.includes('webm') ? (wantAudio ? 'webm' : 'webm')
     : stream.mime?.includes('mp4') ? (wantAudio ? 'm4a' : 'mp4')
     : stream.mime?.includes('mpeg') || stream.mime?.includes('mp3') ? 'mp3'
     : wantAudio ? 'webm' : 'mp4'
@@ -395,6 +408,31 @@ async function tryFastDownload(job: Job, outDir: string, wantAudio: boolean, lab
   const startedAt = Date.now()
 
   const fetched = target
+  if (stream.isHls) {
+    // A media playlist: fetch its segments concurrently, then let ffmpeg remux
+    // the concatenated stream into the requested container.
+    job.status = 'downloading'
+    job.part = 0
+    job.totalParts = 1
+    const startedHls = Date.now()
+    await downloadHls(stream.url, target, {
+      signal: job.abort.signal,
+      onProgress: (done, total) => {
+        job.part = 0
+        job.totalParts = 1
+        // Bytes on disk are unknown until the parts are joined, so report
+        // segment progress as the percentage the UI shows.
+        job.downloadedBytes = done
+        job.bytesOnDisk = done
+        job.totalBytes = total
+        const elapsed = (Date.now() - startedHls) / 1000
+        if (elapsed > 0.1) job.speed = done / elapsed
+      },
+    })
+    job.status = 'processing'
+    return remux(target, wantAudio, job)
+  }
+
   await fetchParallel(stream.url, target, {
     signal: job.abort.signal,
     onProgress: (downloaded, total) => {
@@ -438,6 +476,27 @@ async function tryFastDownload(job: Job, outDir: string, wantAudio: boolean, lab
     return mp3
   }
 
+  return target
+}
+
+/**
+ * Remux a concatenated HLS stream (a plain .ts/.m4s blob) into the format the
+ * job asked for. HLS segments are already encoded, so this is a container
+ * change, not a re-encode.
+ */
+async function remux(source: string, wantAudio: boolean, job: Job): Promise<string> {
+  const target = wantAudio
+    ? source.replace(/\.[^.]+$/, '.mp3')
+    : source.replace(/\.[^.]+$/, '.mp4')
+  const args = wantAudio
+    ? ['-y', '-v', 'error', '-i', source, '-vn', '-acodec', 'libmp3lame', '-q:a', '0', target]
+    : ['-y', '-v', 'error', '-i', source, '-c', 'copy', '-bsf:a', 'aac_adtstoasc', target]
+  await new Promise<void>((resolve, reject) => {
+    const ff = spawn(ffmpegLocation ?? 'ffmpeg', args)
+    ff.on('error', reject)
+    ff.on('close', code => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited with ${code}`))))
+  })
+  await fs.rm(source, {force: true})
   return target
 }
 
@@ -1076,9 +1135,12 @@ const server = createServer((req, res) => {
           // Default by what the link actually is: a music link should give
           // audio, a video tweet should give video. Picking the first audio
           // choice unconditionally turned video links into .mp3 files.
+          // Default by what the link actually is. A music link should give
+          // audio, a video link should give video — and a track that only has a
+          // single "video" format (SoundCloud) is really audio.
           choiceLabel:
             body.choiceLabel ??
-            (probe.source === 'spotify' || probe.source === 'deezer'
+            (isMusicLink(probe)
               ? probe.choices.find(c => c.kind === 'audio')?.label
               : probe.choices.find(c => c.kind === 'video')?.label) ??
             probe.choices[0]?.label,

@@ -173,6 +173,23 @@ Telegram rejects bot uploads over 50 MB, so a larger file is answered with the
 absolute). Find your chat id by messaging the bot and reading the update, or
 with `@userinfobot`.
 
+### HLS (parallel segments)
+
+Sites whose extractor only offers HLS used to fall back to yt-dlp, which fetches
+segments one at a time. On this hardware a segment round-trip is ~100ms and
+there are dozens of them, so the transfer was latency-bound: 12 segments serially
+took 1.4s, concurrently 0.35s.
+
+`src/web/hls.ts` parses the media playlist and fetches segments with a
+concurrency limit (~6), concatenates them, and the server remuxes the result with
+ffmpeg (container change, not a re-encode). Encrypted playlists (AES-128 /
+SAMPLE-AES) are detected and handed back to yt-dlp, which knows about keys and
+byte ranges.
+
+The format listing also carries each format's URL, so one yt-dlp call now covers
+both "what formats exist" and "where is the file" — the previous second call
+cost ~1.4s on Dailymotion for information the first had already returned.
+
 ### Other sites
 
 The fast path used to be an allowlist, so every new site was slow until someone

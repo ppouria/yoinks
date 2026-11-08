@@ -42,6 +42,8 @@ export type ResolvedStream = {
   url: string
   /** True when the resolved stream carries video too and needs extraction. */
   needsExtract?: boolean
+  /** Set when `url` is an HLS playlist rather than a single file. */
+  isHls?: boolean
   /** Content length, when the CDN reports it. */
   size?: number
   mime?: string
@@ -168,8 +170,11 @@ export async function resolveStream(
     let streamUrl: string | undefined
     let lastError: unknown
     let chosenMuxed = false
+    let manifestUrlOut: string | undefined
 
     for (const client of clients) {
+      // `%(formats)j` includes each format's url, so no follow-up `-g` call is
+      // needed for the common case.
       const listArgs = ['--print', '%(formats)j', '--no-playlist', '--no-warnings']
       // The player_client argument is a YouTube detail; other extractors
       // ignore unknown extractor args, so it is safe to pass unconditionally.
@@ -191,9 +196,47 @@ export async function resolveStream(
       }
 
       const spec = pickDirectFormat(formats, opts)
+      // Formats in the listing carry their URL, so no second yt-dlp run is
+      // needed — that call cost ~1.4s on Dailymotion for information we had.
+      if (spec) {
+        const fromListing = formats.find(f => f.format_id === spec.spec)?.url
+        if (fromListing && !fromListing.includes('.m3u8')) {
+          console.log(`[fast] resolved via ${client} (${spec.spec}) from listing`)
+          streamUrl = fromListing
+          chosenMuxed = Boolean(spec.muxed)
+          break
+        }
+      }
       if (!spec) {
-        // Every format is a manifest: yt-dlp must handle it. Trying the other
-        // client would return the same list, so stop here.
+        // Only manifests here. That used to end the fast path, but an HLS
+        // playlist can be fetched concurrently too, which is much faster than
+        // yt-dlp's sequential native download.
+        const manifest = pickManifestFormat(formats, opts)
+        // The listing already gave us the manifest URL in the common case.
+        const manifestFromListing = manifest
+          ? formats.find(f => f.format_id === manifest)?.url
+          : undefined
+        if (manifestFromListing?.includes('.m3u8')) {
+          console.log(`[fast] hls manifest via ${client} (${manifest}) from listing`)
+          manifestUrlOut = manifestFromListing
+          break
+        }
+        if (manifest) {
+          const manifestArgs = ['-g', '-f', manifest, '--no-playlist', '--no-warnings']
+          manifestArgs.push('--extractor-args', `youtube:player_client=${client}`)
+          if (opts.cookiesFile) manifestArgs.push('--cookies', opts.cookiesFile)
+          manifestArgs.push(url)
+          try {
+            const manifestUrl = await runYtDlp(ytdlp, manifestArgs, 25_000)
+            if (manifestUrl.includes('.m3u8')) {
+              console.log(`[fast] hls manifest via ${client} (${manifest})`)
+              manifestUrlOut = manifestUrl
+              break
+            }
+          } catch (error) {
+            lastError = error
+          }
+        }
         lastError = new Error('no progressive stream available')
         break
       }
@@ -220,27 +263,32 @@ export async function resolveStream(
 
     // The winning spec tells us whether the file still carries video.
     const needsExtract = Boolean(streamUrl && chosenMuxed)
-    if (!streamUrl) throw lastError ?? new Error('no direct stream available')
+    if (!streamUrl && !manifestUrlOut) throw lastError ?? new Error('no direct stream available')
 
     // Size and type come from curl for the same reason the download does:
     // Node's client is rejected by this CDN. Failure here is not fatal — the
     // fetch below will surface a real problem — so it never aborts the attempt.
-    const [size, mime] = await Promise.all([
-      contentLength(streamUrl).catch(() => undefined),
-      (async () => {
-        try {
-          return await curlContentType(streamUrl)
-        } catch {
-          return undefined
-        }
-      })(),
-    ])
+    const finalUrl = (manifestUrlOut ?? streamUrl)!
+    // A manifest has no meaningful length or content type; skip the probe.
+    const [size, mime] = manifestUrlOut
+      ? [undefined, 'application/vnd.apple.mpegurl']
+      : await Promise.all([
+          contentLength(finalUrl).catch(() => undefined),
+          (async () => {
+            try {
+              return await curlContentType(finalUrl)
+            } catch {
+              return undefined
+            }
+          })(),
+        ])
 
     const resolved: ResolvedStream = {
-      url: streamUrl,
+      url: finalUrl,
+      isHls: Boolean(manifestUrlOut),
       needsExtract,
       size,
-      mime: mime ?? mimeFromUrl(streamUrl),
+      mime: mime ?? mimeFromUrl(finalUrl),
       resolvedAt: Date.now(),
     }
     cache.set(key, resolved)
@@ -403,6 +451,7 @@ type RawStreamFormat = {
   height?: number
   tbr?: number
   ext?: string
+  url?: string
 }
 
 /** Is this a plain file we can range-fetch (as opposed to a manifest)? */
@@ -441,6 +490,33 @@ function runYtDlpRaw(ytdlp: string, args: string[], timeoutMs: number): Promise<
  * Returns undefined when the extractor only offers manifests — the caller then
  * lets yt-dlp handle it, which is slower but correct for HLS/DASH.
  */
+/**
+ * Choose a manifest stream when the extractor offers no progressive file.
+ * Returns the format spec whose URL is the m3u8 playlist.
+ */
+export function pickManifestFormat(
+  formats: RawStreamFormat[],
+  opts: {preferAudio: boolean; height?: number},
+): string | undefined {
+  const manifests = formats.filter(f => (f.protocol ?? '').includes('m3u8') && f.format_id)
+  if (manifests.length === 0) return undefined
+
+  if (opts.preferAudio) {
+    const audio = manifests
+      .filter(f => audioKnown(f) && !videoKnown(f))
+      .sort((a, b) => (b.tbr ?? 0) - (a.tbr ?? 0))[0]
+    if (audio?.format_id) return audio.format_id
+    const any = manifests.sort((a, b) => (b.tbr ?? 0) - (a.tbr ?? 0))[0]
+    return any?.format_id
+  }
+
+  const limit = opts.height ?? 100_000
+  const byHeight = manifests
+    .filter(f => (f.height ?? 0) > 0 && (f.height ?? 0) <= limit)
+    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0) || (b.tbr ?? 0) - (a.tbr ?? 0))
+  return (byHeight[0] ?? manifests[0])?.format_id
+}
+
 export function pickDirectFormat(
   formats: RawStreamFormat[],
   opts: {preferAudio: boolean; height?: number},
