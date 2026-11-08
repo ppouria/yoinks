@@ -23,6 +23,7 @@ import {enrichAlbumFields, isSpotifyUrl, lookupSpotify} from './spotify.js'
 import {resolveAudioSource} from './audio-sources.js'
 import {deezerTrackId, deezerTrackMedia, downloadDeezerAudio, isDeezerUrl, searchDeezer} from './deezer.js'
 import {raceAudioSources} from './source-race.js'
+import {startTelegramBot, telegramConfigured} from './telegram.js'
 import {applyTags} from './tagging.js'
 import {
   directStream,
@@ -1072,8 +1073,16 @@ const server = createServer((req, res) => {
         const started = await handleDownload({
           ...body,
           choice: body.choice ?? 0,
-          choiceLabel: body.choiceLabel ?? probe.choices.find(c => c.kind === 'audio')?.label ?? probe.choices[0]?.label,
-          title: body.title ?? probe.spotify?.name,
+          // Default by what the link actually is: a music link should give
+          // audio, a video tweet should give video. Picking the first audio
+          // choice unconditionally turned video links into .mp3 files.
+          choiceLabel:
+            body.choiceLabel ??
+            (probe.source === 'spotify' || probe.source === 'deezer'
+              ? probe.choices.find(c => c.kind === 'audio')?.label
+              : probe.choices.find(c => c.kind === 'video')?.label) ??
+            probe.choices[0]?.label,
+          title: body.title ?? probe.spotify?.name ?? probe.title,
           artist: body.artist ?? probe.spotify?.artist,
           audioUrl: body.audioUrl ?? probe.audioUrl,
           previewUrl: body.previewUrl ?? probe.previewUrl,
@@ -1150,6 +1159,55 @@ async function main(): Promise<void> {
   server.listen(PORT, HOST, () => {
     console.log(`yoinks-web listening on ${HOST}:${PORT} (work dir: ${WORK_DIR})`)
   })
+
+  // Telegram bot: reuses the same probe/download path as the web UI, so a link
+  // sent to the bot behaves exactly like a link pasted on the site.
+  if (telegramConfigured()) {
+    const publicBase = process.env.YOINKS_PUBLIC_URL || 'https://downloader.avomi.ir'
+    void startTelegramBot(
+      {
+        startJob: async (link: string) => {
+          const probe = await handleProbe({url: link})
+          const isAudio = probe.source === 'spotify' || probe.source === 'deezer'
+          const label =
+            (isAudio
+              ? probe.choices.find(c => c.kind === 'audio')?.label
+              : probe.choices.find(c => c.kind === 'video')?.label) ?? probe.choices[0]?.label
+          const {job} = await handleDownload({
+            url: link,
+            choice: 0,
+            choiceLabel: label,
+            retentionHours: Number(process.env.TELEGRAM_RETENTION_HOURS || 4),
+            title: probe.spotify?.name ?? probe.title,
+            artist: probe.spotify?.artist,
+            audioUrl: probe.audioUrl,
+            previewUrl: probe.previewUrl,
+            deezerTrackId: (probe as {deezerTrackId?: string}).deezerTrackId,
+          })
+          return {jobId: job.id, title: job.title, isAudio}
+        },
+        waitForJob: async (jobId: string, timeoutMs: number) => {
+          const deadline = Date.now() + timeoutMs
+          for (;;) {
+            const job = jobs.get(jobId)
+            if (!job) return {status: 'error', error: 'job disappeared'}
+            if (job.status === 'done' || job.status === 'error' || job.status === 'cancelled') {
+              return {
+                status: job.status,
+                filepath: job.filepath,
+                filename: job.filename,
+                error: job.error,
+                expiresAt: job.expiresAt,
+              }
+            }
+            if (Date.now() > deadline) return {status: 'error', error: 'timed out'}
+            await new Promise(resolve => setTimeout(resolve, 500))
+          }
+        },
+      },
+      publicBase,
+    )
+  }
 
   try {
     ytdlpPath = await ensureYtDlp(message => console.log(`[yt-dlp] ${message}`))

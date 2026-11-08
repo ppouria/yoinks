@@ -147,6 +147,35 @@ its download button lands a couple of seconds later.
 `POST /api/info` + `POST /api/download` remain available separately for clients
 that want to show a format picker before committing.
 
+### Telegram bot
+
+Send the bot a link and it replies with the file. It is a long-polling bot (no
+webhook, no extra public port) and it calls the **same** probe/download code as
+the web UI, so source racing, cookie jars and Deezer decryption all apply.
+
+1. Message [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
+2. Put it on the server:
+
+```sh
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+# optional: comma-separated chat ids; set this, or anyone who finds the bot
+# downloads on your Deezer session
+TELEGRAM_ALLOWED_CHATS=123456789
+```
+
+3. Restart. The log shows `[telegram] bot @yourbot polling`.
+
+Telegram rejects bot uploads over 50 MB, so a larger file is answered with the
+`/api/jobs/<id>/file` link instead (set `YOINKS_PUBLIC_URL` so the link is
+absolute). Find your chat id by messaging the bot and reading the update, or
+with `@userinfobot`.
+
+### X / Twitter
+
+Twitter publishes both HLS variants and progressive MP4s (`http-*`). The fast
+path requests the progressive one, so the file is a single range-fetch instead of
+yt-dlp reassembling HLS segments: **~28s → ~3s** for a 30-second video.
+
 ### Audio sources
 
 Providers are asked **in parallel** and the first full-length answer wins

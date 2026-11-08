@@ -52,7 +52,14 @@ export type ResolvedStream = {
  * Extractors that hand out a single direct file. HLS/m3u8 and DASH manifests
  * are excluded: they need segmentation, which is exactly what yt-dlp is for.
  */
-const DIRECT_HOSTS = ['youtube.com', 'youtu.be', 'soundcloud.com']
+const DIRECT_HOSTS = [
+  'youtube.com',
+  'youtu.be',
+  'soundcloud.com',
+  // Twitter exposes progressive mp4 variants (http-*) alongside HLS.
+  'x.com',
+  'twitter.com',
+]
 
 /** Deezer hands out a plain CDN file, so no resolve step is needed. */
 export function isDirectFile(url: string): boolean {
@@ -152,11 +159,20 @@ export async function resolveStream(
     // would ship a 10MB video for a 3MB song. When no audio-only format exists
     // yt-dlp reports the failure and the caller falls back to its own download,
     // which merges/extracts with ffmpeg.
+    // Twitter publishes both HLS variants and plain progressive MP4s. The
+    // progressive ones are a single file we can range-fetch, which is an order
+    // of magnitude faster than letting yt-dlp reassemble HLS segments; prefer
+    // them when the extractor offers them.
     const formats = opts.preferAudio
       ? ['ba', 'bestaudio', '140/140-drc/251']
-
       : opts.height
-        ? [`b[height<=${opts.height}]`, `bv*[height<=${opts.height}]+ba/b[height<=${opts.height}]`, 'b']
+        ? [
+            `http-${opts.height}`,
+            `bv*[height<=${opts.height}][protocol=https]+ba/b[height<=${opts.height}][protocol=https]`,
+            `b[height<=${opts.height}]`,
+            `bv*[height<=${opts.height}]+ba/b[height<=${opts.height}]`,
+            'b',
+          ]
         : ['b', 'bv*+ba/b']
 
     // Which player client works depends on whether we are signed in, and that
