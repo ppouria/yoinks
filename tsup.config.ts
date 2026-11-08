@@ -20,6 +20,10 @@ export default defineConfig([
     // tsup's publicDir flattens files into the output root, and server.ts
     // serves ./public next to itself — copy it explicitly instead.
     onSuccess: 'node -e "const f=require(\'node:fs\');f.cpSync(\'src/web/public\',\'dist/web/public\',{recursive:true});f.cpSync(\'src/web/deezer_bridge.py\',\'dist/web/deezer_bridge.py\')"',
+    // ffmpeg-static resolves a binary path at runtime, so it stays external.
+    // teleproto is bundled: it is a 6MB tree of CJS files that the deployed
+    // app would otherwise have to install (and keep updated) on the server.
     external: ['ffmpeg-static'],
+    noExternal: ['teleproto'],
   },
 ])

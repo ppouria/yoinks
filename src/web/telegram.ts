@@ -12,6 +12,7 @@
  */
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import {sendLargeFileAsUser, userUploadConfigured} from './large-file.js'
 
 const API = (token: string, method: string) => `https://api.telegram.org/bot${token}/${method}`
 
@@ -140,11 +141,24 @@ async function handleMessage(update: Update, deps: BotDeps): Promise<void> {
   const seconds = Math.round((Date.now() - started) / 1000)
   const caption = `${title}\n${formatBytes(await fs.stat(job.filepath).then(s => s.size).catch(() => 0))} · ${seconds}s`
 
-  const sent = await sendFile(chatId, job.filepath, filename, caption).catch(() => false)
+  const size = await fs.stat(job.filepath).then(stat => stat.size).catch(() => 0)
+  const botLimit = size <= MAX_UPLOAD_BYTES
+  const sent = botLimit ? await sendFile(chatId, job.filepath, filename, caption).catch(() => false) : false
+
+  if (!sent && !botLimit && userUploadConfigured()) {
+    // Over the Bot API's 50MB but a user account can send up to 2GB: log in as
+    // that account over MTProto and deliver the file from there.
+    await sendMessage(chatId, `Large file (${formatBytes(size)}) — sending from the user account…`)
+    const messageId = await sendLargeFileAsUser(chatId, job.filepath, caption).catch(error => {
+      console.error('[telegram] user upload failed:', (error as Error).message)
+      return undefined
+    })
+    if (messageId !== undefined) return
+  }
+
   if (!sent) {
-    // Too large, or Telegram refused it: the file still exists behind our own
-    // URL, so hand that over rather than leaving the user with nothing.
-    await sendMessage(chatId, `${title}\nThe file is too large for Telegram, but it is here: ${publicUrl ?? ''}/api/jobs/${jobId}/file`)
+    // Nothing could deliver the file: hand over the link rather than nothing.
+    await sendMessage(chatId, `${title}\nCould not send the file (${formatBytes(size)}), but it is here: ${publicUrl ?? ''}/api/jobs/${jobId}/file`)
   }
 }
 

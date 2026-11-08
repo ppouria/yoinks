@@ -168,10 +168,36 @@ Keep these in the app's `.env` on the server. `.env*` and `cookies/` are in
 
 3. Restart. The log shows `[telegram] bot @yourbot polling`.
 
-Telegram rejects bot uploads over 50 MB, so a larger file is answered with the
-`/api/jobs/<id>/file` link instead (set `YOINKS_PUBLIC_URL` so the link is
-absolute). Find your chat id by messaging the bot and reading the update, or
-with `@userinfobot`.
+Telegram rejects **bot** uploads over 50 MB. For anything larger the bot switches
+to a real user account over MTProto, which can send up to **2 GB** (4 GB with
+Premium), and delivers the file from there.
+
+**Setting up the large-file account** (one time):
+
+1. Get `api_id` / `api_hash` from <https://my.telegram.org/apps>.
+2. Log in once, on a machine with a terminal — it asks for the phone number, the
+   code Telegram sends, and the 2FA password if there is one:
+
+```sh
+TELEGRAM_API_ID=12345 TELEGRAM_API_HASH=abc... npm run telegram:login
+```
+
+3. It prints `TELEGRAM_USER_SESSION=...`. Put that, plus the id/hash, in the
+   server's `.env` and restart.
+
+```sh
+TELEGRAM_API_ID=12345
+TELEGRAM_API_HASH=abc...
+TELEGRAM_USER_SESSION=1BVtsOK...
+```
+
+That session string is a **full login to the account** — anyone holding it can
+read and send as that user. Keep it in `.env` only (it is gitignored). Without
+these three variables the bot still works; oversized files just fall back to a
+download link.
+
+Find your chat id by messaging the bot and reading the update, or with
+`@userinfobot`.
 
 ### HLS (parallel segments)
 

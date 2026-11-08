@@ -25,6 +25,7 @@ import {deezerTrackId, deezerTrackMedia, downloadDeezerAudio, isDeezerUrl, searc
 import {raceAudioSources} from './source-race.js'
 import {downloadHls} from './hls.js'
 import {startTelegramBot, telegramConfigured} from './telegram.js'
+import {stopUserUploader} from './large-file.js'
 import {applyTags} from './tagging.js'
 import {
   directStream,
@@ -1283,6 +1284,7 @@ async function main(): Promise<void> {
 }
 
 process.on('SIGTERM', () => {
+  void stopUserUploader()
   for (const job of jobs.values()) job.abort.abort()
   server.close(() => process.exit(0))
   setTimeout(() => process.exit(0), 3000).unref()

@@ -22,7 +22,8 @@
     "web": "node dist/web/server.js",
     "web:dev": "YOINKS_WEB_NO_AUTOSTART= tsx src/web/server.ts",
     "build:web": "cd webapp/webapp && npx vite build",
-    "dev:web": "cd webapp/webapp && npx vite"
+    "dev:web": "cd webapp/webapp && npx vite",
+    "telegram:login": "node --experimental-strip-types scripts/telegram-login.ts"
   },
   "author": "Pablo Stanley",
   "keywords": [
@@ -43,7 +44,8 @@
     "ink": "^7.1.0",
     "ink-select-input": "^6.2.0",
     "ink-spinner": "^5.0.0",
-    "react": "^19.2.7"
+    "react": "^19.2.7",
+    "teleproto": "^1.232.1"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
