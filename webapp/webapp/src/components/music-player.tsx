@@ -122,15 +122,21 @@ export function MusicPlayer({
           </div>
         ) : null}
 
-        {failed ? (
+        {failed && track.src ? (
           <p className="text-sm text-destructive">
             This browser could not play the file directly. Use download instead.
           </p>
         ) : null}
 
+        {!track.src ? (
+          <p className="text-sm text-muted-foreground">
+            Preparing the audio — playback starts as soon as the file is ready.
+          </p>
+        ) : null}
+
         <audio
           ref={audioRef}
-          src={track.src}
+          src={track.src || undefined}
           preload="metadata"
           onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)}
           onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}

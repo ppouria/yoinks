@@ -14,6 +14,36 @@ reused, and a different arl switches account without restarting the process.
 import json
 import sys
 
+
+# Deezer serves the audio encrypted with BF_CBC_STRIPE. Metadata readers see a
+# normal file, but no decoder can play it until it is decrypted. The scheme is
+# public: the Blowfish key is derived from the track id, the IV is fixed, and
+# only every third 2048-byte block is encrypted.
+import hashlib
+
+_BF_SECRET = b"g4el58wc0zvf9na1"
+_BF_IV = bytes(range(8))
+
+
+def blowfish_key(track_id: str) -> bytes:
+    """Blowfish key for a track: md5(id) xor md5(id)[16:] xor a fixed secret."""
+    digest = hashlib.md5(track_id.encode()).hexdigest().encode()
+    return bytes(digest[i] ^ digest[i + 16] ^ _BF_SECRET[i] for i in range(16))
+
+
+def decrypt_audio(data: bytes, track_id: str) -> bytes:
+    """Decrypt a BF_CBC_STRIPE buffer; every third 2048-byte block is encrypted."""
+    from Cryptodome.Cipher import Blowfish
+
+    key = blowfish_key(track_id)
+    out = bytearray()
+    for index, offset in enumerate(range(0, len(data), 2048)):
+        block = data[offset : offset + 2048]
+        if index % 3 == 0 and len(block) == 2048:
+            block = Blowfish.new(key, Blowfish.MODE_CBC, _BF_IV).decrypt(block)
+        out += block
+    return bytes(out)
+
 _state = {"arl": None, "client": None, "formats": None}
 
 
@@ -103,6 +133,32 @@ def handle(request):
             return {"ok": True, "track": summarise(track), "url": url_for(client, track)}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"Deezer could not serve this track: {exc}"}
+
+    if op == "download":
+        # Fetch and decrypt in one step: the CDN bytes are unplayable as-is, so
+        # handing the URL to the caller would produce a corrupt file.
+        import urllib.request
+
+        track_id = str(request.get("trackId") or "").strip()
+        if not track_id:
+            return {"ok": False, "error": "missing trackId"}
+        try:
+            track = client.gw.get_track(track_id)
+            media_url = url_for(client, track)
+            req = urllib.request.Request(media_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=60) as response:
+                raw = response.read()
+            decrypted = decrypt_audio(raw, track_id)
+            out_path = request.get("outPath")
+            if out_path:
+                # The worker writes the file itself: shipping megabytes of audio
+                # back through a JSON pipe would be absurd.
+                with open(out_path, "wb") as handle:
+                    handle.write(decrypted)
+                return {"ok": True, "track": summarise(track), "path": out_path, "bytes": len(decrypted)}
+            return {"ok": True, "track": summarise(track), "audio": decrypted.hex(), "encrypted": True}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"Deezer download failed: {exc}"}
 
     if op == "ping":
         return {"ok": True}

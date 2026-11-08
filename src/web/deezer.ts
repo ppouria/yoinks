@@ -144,6 +144,31 @@ export async function searchDeezer(query: string, arl: string): Promise<DeezerRe
   return normalise(await callBridge({op: 'search', query}, arl))
 }
 
+/**
+ * Download a track's audio, decrypted, straight to `outPath`.
+ *
+ * Deezer's CDN bytes are BF_CBC_STRIPE-encrypted, so the URL itself is useless
+ * to a player: fetching it directly yields a file that looks like an mp3 and
+ * decodes to nothing. The worker fetches and decrypts in one step.
+ */
+export async function downloadDeezerAudio(
+  trackId: string,
+  arl: string,
+  outPath: string,
+): Promise<{track: DeezerTrack; path: string; bytes: number}> {
+  if (!arl) throw new Error('No Deezer session configured.')
+  const reply = (await callBridge({op: 'download', trackId, outPath}, arl, 90_000)) as BridgeReply & {
+    path?: string
+    bytes?: number
+  }
+  if (!reply.ok || !reply.path) throw new Error(reply.error || 'Deezer download failed.')
+  return {
+    track: normalise({...reply, url: reply.path}).track,
+    path: reply.path,
+    bytes: reply.bytes ?? 0,
+  }
+}
+
 export async function deezerTrackMedia(trackId: string, arl: string): Promise<DeezerResult> {
   if (!arl) throw new Error('No Deezer session configured.')
   return normalise(await callBridge({op: 'media', trackId}, arl))

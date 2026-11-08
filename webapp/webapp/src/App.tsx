@@ -131,6 +131,7 @@ export function App() {
         artist: info.spotify?.artist,
         audioUrl: info.audioUrl,
         previewUrl: info.previewUrl,
+        deezerTrackId: info.deezerTrackId,
       })
       setJob(created)
     } catch (error) {

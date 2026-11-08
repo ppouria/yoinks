@@ -147,6 +147,27 @@ its download button lands a couple of seconds later.
 `POST /api/info` + `POST /api/download` remain available separately for clients
 that want to show a format picker before committing.
 
+### Audio sources
+
+Providers are asked **in parallel** and the first full-length answer wins
+(`src/web/source-race.ts`). A fixed order meant always paying for whichever
+provider happened to be slow; racing means a slow YouTube does not hold up a
+fast Deezer result.
+
+| Source | Needs | Notes |
+| --- | --- | --- |
+| Deezer | `arl` cookie (free account) | Fastest: one API call, ~1s |
+| YouTube / SoundCloud | — | via yt-dlp; benefits from a YouTube session |
+
+A candidate only wins if it returns playable media **and** its duration matches
+the requested track to within 10% — that is what stops a 30-second preview from
+being served as the song.
+
+Note on Deezer: its CDN serves BF_CBC_STRIPE-encrypted audio, so the URL alone
+is useless to a player and to ffprobe. The bridge fetches and decrypts it
+(key derived from the track id, every third 2048-byte block) before the file is
+written, which is why the container looks like a normal mp3 only after that step.
+
 ### Deezer (fastest audio source)
 
 Deezer is the only source that returns a plain CDN file after a single API call

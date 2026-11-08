@@ -22,6 +22,8 @@ export type ProbeResult = {
   audioUrl?: string
   /** Same-origin, browser-playable stream for the player. */
   previewUrl?: string
+  /** Present when Deezer supplied the audio; required to decrypt it. */
+  deezerTrackId?: string
   spotify?: {
     name: string
     artist: string
@@ -109,6 +111,7 @@ export const api = {
     audioUrl?: string
     /** Same-origin (or direct CDN) stream the probe already validated. */
     previewUrl?: string
+    deezerTrackId?: string
   }) => request<{ job: Job }>("/api/download", { method: "POST", body: JSON.stringify(params) }),
 
   job: (id: string) => request<Job>(`/api/jobs/${id}`),

@@ -21,7 +21,8 @@ import {isProbablyUrl} from '../lib/platforms.js'
 import {CookieStore, KNOWN_SITES, siteForUrl} from './cookies.js'
 import {enrichAlbumFields, isSpotifyUrl, lookupSpotify} from './spotify.js'
 import {resolveAudioSource} from './audio-sources.js'
-import {deezerTrackId, deezerTrackMedia, isDeezerUrl, searchDeezer, type DeezerTrack} from './deezer.js'
+import {deezerTrackId, deezerTrackMedia, downloadDeezerAudio, isDeezerUrl, searchDeezer} from './deezer.js'
+import {raceAudioSources} from './source-race.js'
 import {applyTags} from './tagging.js'
 import {
   directStream,
@@ -149,6 +150,8 @@ type Job = {
   spotify?: SpotifyTrack
   /** Basename (no extension) used for the finished file. */
   baseName?: string
+  /** Set when the audio comes from Deezer and needs fetching+decrypting. */
+  deezerTrackId?: string
   choice: DownloadChoice
   title: string
   status: JobStatus
@@ -353,6 +356,22 @@ async function sampleBytesOnDisk(job: Job): Promise<void> {
 async function tryFastDownload(job: Job, outDir: string, wantAudio: boolean, label: string): Promise<string> {
   // Video+audio merging needs ffmpeg, so only a progressive (muxed) format is
   // eligible. That is exactly what yt-dlp's `b` picks, and `-g` will say so.
+  // Deezer audio is encrypted at rest on their CDN; fetch and decrypt it in the
+  // bridge rather than treating the URL like a plain file.
+  if (job.deezerTrackId) {
+    const outPath = path.join(outDir, safeFilename(`${job.baseName ?? job.title ?? 'audio'}.mp3`, '.mp3'))
+    job.status = 'downloading'
+    job.totalParts = 1
+    const startedAt = Date.now()
+    const result = await downloadDeezerAudio(job.deezerTrackId, await deezerArl(), outPath)
+    job.bytesOnDisk = result.bytes
+    job.downloadedBytes = result.bytes
+    job.totalBytes = result.bytes
+    job.speed = result.bytes / Math.max(0.001, (Date.now() - startedAt) / 1000)
+    job.eta = 0
+    return outPath
+  }
+
   const stream = isDirectFile(job.url)
     ? directStream(job.url)
     : await resolveStream(ytdlpPath, job.url, {
@@ -581,7 +600,9 @@ async function handleProbe(body: Record<string, unknown>) {
       extractor: 'Deezer',
       source: 'deezer',
       audioUrl: hit.url,
-      previewUrl: hit.url,
+      // Same reasoning as the Spotify branch: encrypted CDN bytes are not
+      // playable, so the finished file is the only usable source.
+      previewUrl: undefined,
       deezer: hit.track,
       choices: [{index: 0, label: 'audio only · mp3', kind: 'audio'}],
     }
@@ -590,56 +611,65 @@ async function handleProbe(body: Record<string, unknown>) {
   // Spotify is metadata-only: spotDL resolves the track, we then offer the
   // audio sourced from a public provider.
   if (isSpotifyUrl(url)) {
+    // Spotify metadata is a nice-to-have, not a requirement: a track can be
+    // missing from the embed page *and* crash spotdl (removed, region-locked,
+    // new layout) while Deezer still has the song. Only give up when the media
+    // lookup also fails.
     const track = await lookupSpotify(url, path.join(WORK_DIR, '.tmp')).catch(error => {
-      throw new HttpError(422, error instanceof Error ? error.message : 'Spotify lookup failed.')
+      console.log(`spotify metadata unavailable for ${url}:`, (error as Error).message.slice(0, 140))
+      return undefined
     })
 
     // Find audio now, not at download time — the point is to fail here, in the
     // UI, with a readable reason, rather than after the user waits.
-    const query = `${track.artist} - ${track.name}`
+    const query = track ? `${track.artist} - ${track.name}` : ''
 
     // Deezer first: one API call returns a plain CDN file, which is several
     // times faster than anything that goes through yt-dlp. Only a *full-length*
     // Deezer match counts — a 30s preview would be a wrong file.
-    let deezer: {url: string; label: string} | undefined
+    // Race every provider at once and keep whichever answers first with a
+    // full-length track — a fixed order means always paying for the slow one.
+    let hit
     try {
-      const hit = await searchDeezer(query, await deezerArl())
-      if (durationMatches(hit.track.duration, track.duration)) {
-        deezer = {url: hit.url, label: 'Deezer'}
-      }
+      hit = await raceAudioSources({
+        query,
+        duration: track?.duration,
+        ytdlp: ytdlpPath,
+        deezerArl: await deezerArl(),
+        youtubeCookies: await cookiesFor('https://www.youtube.com/'),
+        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+      })
     } catch (error) {
-      console.log(`deezer lookup skipped: ${(error as Error).message.slice(0, 120)}`)
+      console.error(`no audio source for "${query}":`, (error as Error).message.slice(0, 300))
+      throw new HttpError(422, (error as Error).message || 'No source could serve that track.')
     }
 
-    if (!deezer) {
-      try {
-        const source = await resolveAudioSource(query, {
-          ytdlp: ytdlpPath,
-          cookiesFile: await cookiesFor('https://www.youtube.com/'),
-          signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-          expectedSeconds: track.duration,
-        })
-        deezer = {url: source.url, label: source.label}
-      } catch (error) {
-        console.error(`spotify audio lookup failed for ${track.id}:`, (error as Error).message.slice(0, 300))
-        throw new HttpError(422, (error as Error).message)
-      }
+    const viaDeezer = hit.provider === 'Deezer'
+    // Without Spotify metadata, describe the track from whatever the source
+    // matched — the user still gets a titled, playable result.
+    const meta = {
+      name: track?.name ?? 'Unknown track',
+      artist: track?.artist ?? 'Unknown artist',
     }
-
-    const viaDeezer = deezer.label === 'Deezer'
 
     return {
-      title: `${track.name} — ${track.artist}`,
-      uploader: track.album ?? track.artist,
-      duration: track.duration,
-      thumbnail: track.cover,
-      extractor: `Spotify → audio from ${deezer.label}`,
-      spotify: track,
+      title: `${meta.name} — ${meta.artist}`,
+      uploader: track?.album ?? meta.artist,
+      duration: track?.duration ?? hit.duration,
+      thumbnail: track?.cover,
+      extractor: `Spotify → audio from ${hit.provider}`,
+      // A Deezer win carries its track id so the download can decrypt.
+      deezerTrackId: hit.deezerTrackId,
+      spotify: track ?? {id: '', name: meta.name, artist: meta.artist, url},
       source: 'spotify',
-      audioUrl: deezer.url,
+      audioUrl: hit.url,
       // A Deezer URL is already a playable file; a YouTube page is not, so it
       // needs the same-origin proxy instead.
-      previewUrl: viaDeezer ? deezer.url : `/api/preview?url=${encodeURIComponent(deezer.url)}`,
+      // Deezer hands out obfuscated bytes that only its own player decrypts, and
+      // the URL is signed to this server's IP anyway. The playable audio is the
+      // file our pipeline produces, so no preview URL is offered here — the
+      // player switches to /api/jobs/:id/file as soon as the job is done.
+      previewUrl: viaDeezer ? undefined : `/api/preview?url=${encodeURIComponent(hit.url)}`,
       choices: [{index: 0, label: 'audio only · mp3', kind: 'audio'}],
     }
   }
@@ -796,6 +826,9 @@ async function handleDownload(body: Record<string, unknown>) {
     totalParts: 1,
     createdAt: Date.now(),
     retentionHours: retention.hours,
+    deezerTrackId:
+      (typeof body.deezerTrackId === 'string' ? body.deezerTrackId : undefined) ??
+      (spotify?.id && /^\d+$/.test(spotify.id) ? spotify.id : undefined),
     baseName: spotify
       ? safeFilename(`${spotify.artist} - ${spotify.name}`, '.mp3').replace(/\.mp3$/, '')
       : undefined,
@@ -883,12 +916,17 @@ async function resolveStreamUrl(target: string): Promise<string> {
 /** Streams the upstream media to the browser, forwarding Range requests. */
 async function handlePreview(target: string, req: IncomingMessage, res: ServerResponse) {
   if (streamCache.size > 200) streamCache.clear()
-  const media = await resolveStreamUrl(target)
+  // A Deezer (or other direct) URL is already the media; running yt-dlp on it
+  // would fail. Only page URLs need resolving.
+  const media = isDirectFile(target) ? target : await resolveStreamUrl(target)
 
   const upstream = await new Promise<{status: number; headers: Headers; body: AsyncIterable<Uint8Array> | null}>(
     async (resolve, reject) => {
       const controller = new AbortController()
-      req.on('close', () => controller.abort())
+      // Abort only when the *response* goes away. Listening on the request
+      // fires as soon as the (empty) request body ends, which killed the
+      // stream a few hundred KB in.
+      res.on('close', () => controller.abort())
       try {
         const response = await fetch(media, {
           headers: {
@@ -1039,6 +1077,7 @@ const server = createServer((req, res) => {
           artist: body.artist ?? probe.spotify?.artist,
           audioUrl: body.audioUrl ?? probe.audioUrl,
           previewUrl: body.previewUrl ?? probe.previewUrl,
+          deezerTrackId: body.deezerTrackId ?? (probe as {deezerTrackId?: string}).deezerTrackId,
           retentionHours: wantedRetention,
         })
         return json(res, 202, {...started, info: probe})
