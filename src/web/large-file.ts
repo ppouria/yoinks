@@ -33,13 +33,30 @@ export function userUploadConfigured(): boolean {
   return Boolean(SESSION && API_ID && API_HASH)
 }
 
+/**
+ * `teleproto/sessions` is CJS; bundling to ESM puts its exports on `.default`
+ * while a dev run exposes them as named exports. Accept both.
+ */
+type StringSessionCtor = new (value: string) => import('teleproto/sessions').StringSession
+async function loadStringSession(): Promise<StringSessionCtor> {
+  const mod = (await import('teleproto/sessions')) as unknown as {
+    StringSession?: unknown
+    default?: {StringSession?: unknown}
+  }
+  const candidate = mod.StringSession ?? mod.default?.StringSession
+  if (!candidate) throw new Error('teleproto sessions module is unavailable')
+  // The runtime object is a teleproto Session; the cast keeps the call sites
+  // typed without re-declaring its interface here.
+  return candidate as unknown as StringSessionCtor
+}
+
 async function getClient(): Promise<InstanceType<TeleprotoModule['TelegramClient']>> {
   if (client) return client
   if (connecting) return connecting
 
   connecting = (async () => {
     const {TelegramClient} = await import('teleproto')
-    const {StringSession} = await import('teleproto/sessions')
+    const StringSession = await loadStringSession()
 
     const instance = new TelegramClient(new StringSession(SESSION), API_ID, API_HASH, {
       connectionRetries: 3,
@@ -104,7 +121,7 @@ export async function stopUserUploader(): Promise<void> {
  */
 export async function interactiveLogin(): Promise<void> {
   const {TelegramClient} = await import('teleproto')
-  const {StringSession} = await import('teleproto/sessions')
+  const StringSession = await loadStringSession()
   const readline = await import('node:readline/promises')
 
   if (!API_ID || !API_HASH) {

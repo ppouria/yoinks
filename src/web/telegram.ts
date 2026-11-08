@@ -29,6 +29,12 @@ export type BotDeps = {
   }>
 }
 
+type TelegramFile = {
+  file_id: string
+  file_name?: string
+  file_size?: number
+}
+
 type Update = {
   update_id: number
   message?: {
@@ -36,6 +42,10 @@ type Update = {
     chat: {id: number; type: string}
     from?: {id: number; username?: string}
     text?: string
+    /** The user sent a file — this is what gets copied back. */
+    document?: TelegramFile
+    video?: TelegramFile
+    audio?: TelegramFile
   }
 }
 
@@ -91,7 +101,7 @@ const URL_PATTERN = /https?:\/\/\S+/i
 
 async function handleMessage(update: Update, deps: BotDeps): Promise<void> {
   const message = update.message
-  if (!message?.text) return
+  if (!message) return
   const chatId = message.chat.id
 
   if (ALLOWED.length > 0 && !ALLOWED.includes(String(chatId))) {
@@ -99,13 +109,32 @@ async function handleMessage(update: Update, deps: BotDeps): Promise<void> {
     return
   }
 
+  // A file the user sent us: copy it straight back. This is the delivery path
+  // for anything above the bot's 50MB upload limit — the bytes are already on
+  // Telegram's servers, so copying costs nothing instead of a second upload.
+  const file = message.document ?? message.video ?? message.audio
+  if (file) {
+    const label = file.file_name ?? 'file'
+    const copied = await copyMessageTo(chatId, chatId, message.message_id)
+    await sendMessage(
+      chatId,
+      copied
+        ? `${label} (${formatBytes(file.file_size ?? 0)}) copied back to you.`
+        : `Could not copy ${label}.`,
+    )
+    return
+  }
+
+  if (!message.text) return
   const text = message.text.trim()
 
   if (text === '/start' || text === '/help') {
     await sendMessage(
       chatId,
       'Send me a link — Spotify, YouTube, X, SoundCloud, Deezer — and I will send the file back.\n\n' +
-        'I keep the finished file for a few hours and can also give you a download link.',
+        'Files up to 50MB come straight from me. Anything bigger: I give you a link, and if you\n' +
+        'send that file to me as a document I will copy it straight back — no re-upload.\n\n' +
+        'I keep finished files for a few hours.',
     )
     return
   }
@@ -143,22 +172,47 @@ async function handleMessage(update: Update, deps: BotDeps): Promise<void> {
 
   const size = await fs.stat(job.filepath).then(stat => stat.size).catch(() => 0)
   const botLimit = size <= MAX_UPLOAD_BYTES
-  const sent = botLimit ? await sendFile(chatId, job.filepath, filename, caption).catch(() => false) : false
 
-  if (!sent && !botLimit && userUploadConfigured()) {
-    // Over the Bot API's 50MB but a user account can send up to 2GB: log in as
-    // that account over MTProto and deliver the file from there.
-    await sendMessage(chatId, `Large file (${formatBytes(size)}) — sending from the user account…`)
-    const messageId = await sendLargeFileAsUser(chatId, job.filepath, caption).catch(error => {
-      console.error('[telegram] user upload failed:', (error as Error).message)
-      return undefined
-    })
-    if (messageId !== undefined) return
+  // The bot uploads directly while the file fits in its 50MB budget.
+  if (botLimit && (await sendFile(chatId, job.filepath, filename, caption).catch(() => false))) return
+
+  // Over the limit: the Bot API cannot upload it, and re-uploading through a
+  // user account would move the same bytes twice. Instead the user sends the
+  // file *to the bot* from their own client (which is what a user account is
+  // for anyway), and the bot copies that message back — a copy, not an upload.
+  if (userUploadConfigured()) {
+    await sendMessage(
+      chatId,
+      `Large file (${formatBytes(size)}) — Telegram bots cannot send over 50MB.\n\n` +
+        `Send the file to me as a document, and I will copy it back to you instantly.\n` +
+        `Grab it here: ${publicUrl ?? ''}/api/jobs/${jobId}/file`,
+    )
+    return
   }
 
-  if (!sent) {
-    // Nothing could deliver the file: hand over the link rather than nothing.
-    await sendMessage(chatId, `${title}\nCould not send the file (${formatBytes(size)}), but it is here: ${publicUrl ?? ''}/api/jobs/${jobId}/file`)
+  // Nothing could deliver the file: hand over the link rather than nothing.
+  await sendMessage(chatId, `${title}\nCould not send the file (${formatBytes(size)}), but it is here: ${publicUrl ?? ''}/api/jobs/${jobId}/file`)
+}
+
+/**
+ * Copy a message the user sent to us back to them.
+ *
+ * `copyMessage` has no size limit beyond whatever Telegram already accepted from
+ * the sender, so a 2GB file the user uploaded arrives back instantly — the bytes
+ * are already on Telegram's servers and are only re-pointed.
+ */
+async function copyMessageTo(toChatId: number, fromChatId: number, messageId: number, caption?: string): Promise<boolean> {
+  try {
+    await call('copyMessage', {
+      chat_id: toChatId,
+      from_chat_id: fromChatId,
+      message_id: messageId,
+      ...(caption ? {caption} : {}),
+    })
+    return true
+  } catch (error) {
+    console.error('[telegram] copyMessage failed:', (error as Error).message)
+    return false
   }
 }
 
