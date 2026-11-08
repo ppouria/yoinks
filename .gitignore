@@ -10,3 +10,11 @@ webapp/webapp/dist/
 webapp/dist-app/
 webapp/webapp/.vite/
 webapp/webapp/src/assets/react.svg
+
+# Secrets: bot tokens, session cookies, and the app's env file must never be
+# committed. .env.example documents the keys without the values.
+.env
+.env.*
+!.env.example
+cookies/
+downloads/

@@ -163,12 +163,30 @@ TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 TELEGRAM_ALLOWED_CHATS=123456789
 ```
 
+Keep these in the app's `.env` on the server. `.env*` and `cookies/` are in
+`.gitignore`, so a token cannot be committed by accident.
+
 3. Restart. The log shows `[telegram] bot @yourbot polling`.
 
 Telegram rejects bot uploads over 50 MB, so a larger file is answered with the
 `/api/jobs/<id>/file` link instead (set `YOINKS_PUBLIC_URL` so the link is
 absolute). Find your chat id by messaging the bot and reading the update, or
 with `@userinfobot`.
+
+### Other sites
+
+The fast path used to be an allowlist, so every new site was slow until someone
+added it. It is now offered to every host: yt-dlp is asked once for the format
+list, one direct (progressive) stream is picked from it, and the file is
+range-fetched. Sites whose extractor only has HLS/DASH (Dailymotion, SoundCloud)
+report "no progressive stream" from that single listing and fall back to a
+normal yt-dlp download — one wasted call instead of eight.
+
+Measurements on this deployment: X ~3s, TikTok ~5s (after the first run warms
+up), Dailymotion/SoundCloud ~8–11s (HLS, so yt-dlp does the segmentation).
+
+Instagram, Vimeo and Reddit need a session — add one under **Sessions** and they
+work through the same path.
 
 ### X / Twitter
 

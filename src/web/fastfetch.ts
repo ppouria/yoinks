@@ -48,18 +48,6 @@ export type ResolvedStream = {
   resolvedAt: number
 }
 
-/**
- * Extractors that hand out a single direct file. HLS/m3u8 and DASH manifests
- * are excluded: they need segmentation, which is exactly what yt-dlp is for.
- */
-const DIRECT_HOSTS = [
-  'youtube.com',
-  'youtu.be',
-  'soundcloud.com',
-  // Twitter exposes progressive mp4 variants (http-*) alongside HLS.
-  'x.com',
-  'twitter.com',
-]
 
 /** Deezer hands out a plain CDN file, so no resolve step is needed. */
 export function isDirectFile(url: string): boolean {
@@ -73,8 +61,8 @@ export function isDirectFile(url: string): boolean {
 
 export function supportsFastPath(url: string): boolean {
   try {
-    const host = new URL(url).hostname.toLowerCase()
-    return DIRECT_HOSTS.some(h => host === h || host.endsWith(`.${h}`))
+    const {protocol} = new URL(url)
+    return protocol === 'http:' || protocol === 'https:'
   } catch {
     return false
   }
@@ -159,22 +147,6 @@ export async function resolveStream(
     // would ship a 10MB video for a 3MB song. When no audio-only format exists
     // yt-dlp reports the failure and the caller falls back to its own download,
     // which merges/extracts with ffmpeg.
-    // Twitter publishes both HLS variants and plain progressive MP4s. The
-    // progressive ones are a single file we can range-fetch, which is an order
-    // of magnitude faster than letting yt-dlp reassemble HLS segments; prefer
-    // them when the extractor offers them.
-    const formats = opts.preferAudio
-      ? ['ba', 'bestaudio', '140/140-drc/251']
-      : opts.height
-        ? [
-            `http-${opts.height}`,
-            `bv*[height<=${opts.height}][protocol=https]+ba/b[height<=${opts.height}][protocol=https]`,
-            `b[height<=${opts.height}]`,
-            `bv*[height<=${opts.height}]+ba/b[height<=${opts.height}]`,
-            'b',
-          ]
-        : ['b', 'bv*+ba/b']
-
     // Which player client works depends on whether we are signed in, and that
     // is not predictable per video:
     //   anonymous → visionos/tv_simply answer without a JS challenge
@@ -185,60 +157,69 @@ export async function resolveStream(
     // combination turned a download into a minute of process spawns.
     const clients = opts.cookiesFile ? ['web', 'visionos'] : ['visionos', 'web']
 
+    /**
+     * Ask yt-dlp once which formats exist, then pick a direct one.
+     *
+     * The previous approach tried every format spec against every client and
+     * stopped when one worked — for an HLS-only site (Dailymotion, SoundCloud)
+     * that meant ~8 failing yt-dlp runs, about 16s, before falling back. One
+     * `-F` listing answers the same question in a single call.
+     */
     let streamUrl: string | undefined
     let lastError: unknown
-    for (const format of formats) {
-      for (const client of clients) {
-        const args = [
-          '-g',
-          '-f',
-          format,
-          '--no-playlist',
-          '--no-warnings',
-          '--extractor-args',
-          `youtube:player_client=${client}`,
-        ]
-        if (opts.cookiesFile) args.push('--cookies', opts.cookiesFile)
-        args.push(url)
-        try {
-          const t0 = Date.now()
-          const candidate = await runYtDlp(ytdlp, args, 20_000)
-          // Only a direct file is usable; HLS needs yt-dlp's own downloader.
-          if (candidate.includes('.m3u8')) {
-            lastError = new Error('resolved to an HLS manifest')
-            continue
-          }
-          console.log(`[fast] resolved via ${client} (${format}) in ${Date.now() - t0}ms`)
-          streamUrl = candidate
-          break
-        } catch (error) {
-          lastError = error
-        }
+    let chosenMuxed = false
+
+    for (const client of clients) {
+      const listArgs = ['--print', '%(formats)j', '--no-playlist', '--no-warnings']
+      // The player_client argument is a YouTube detail; other extractors
+      // ignore unknown extractor args, so it is safe to pass unconditionally.
+      listArgs.push('--extractor-args', `youtube:player_client=${client}`)
+      if (opts.cookiesFile) listArgs.push('--cookies', opts.cookiesFile)
+      listArgs.push(url)
+
+      let formats: RawStreamFormat[]
+      try {
+        const listing = await runYtDlpRaw(ytdlp, listArgs, 25_000)
+        formats = JSON.parse(listing) as RawStreamFormat[]
+      } catch (error) {
+        lastError = error
+        continue
       }
-      if (streamUrl) break
+      if (!Array.isArray(formats) || formats.length === 0) {
+        lastError = new Error('no formats reported')
+        continue
+      }
+
+      const spec = pickDirectFormat(formats, opts)
+      if (!spec) {
+        // Every format is a manifest: yt-dlp must handle it. Trying the other
+        // client would return the same list, so stop here.
+        lastError = new Error('no progressive stream available')
+        break
+      }
+
+      const directArgs = ['-g', '-f', spec.spec, '--no-playlist', '--no-warnings']
+      directArgs.push('--extractor-args', `youtube:player_client=${client}`)
+      if (opts.cookiesFile) directArgs.push('--cookies', opts.cookiesFile)
+      directArgs.push(url)
+      chosenMuxed = Boolean(spec.muxed)
+      try {
+        const t0 = Date.now()
+        const candidate = await runYtDlp(ytdlp, directArgs, 25_000)
+        if (candidate.includes('.m3u8') || candidate.includes('.mpd')) {
+          lastError = new Error('resolved to a manifest')
+          continue
+        }
+        console.log(`[fast] resolved via ${client} (${spec.spec}) in ${Date.now() - t0}ms`)
+        streamUrl = candidate
+        break
+      } catch (error) {
+        lastError = error
+      }
     }
 
-    // Some videos genuinely have no audio-only stream (only itag 18, a muxed
-    // 240p file). Fetching that is still far faster than a full yt-dlp
-    // download; the caller strips the video track with ffmpeg afterwards.
-    let needsExtract = false
-    if (!streamUrl && opts.preferAudio) {
-      for (const client of clients) {
-        const args = ['-g', '-f', 'b', '--no-playlist', '--no-warnings', '--extractor-args', `youtube:player_client=${client}`]
-        if (opts.cookiesFile) args.push('--cookies', opts.cookiesFile)
-        args.push(url)
-        try {
-          const candidate = await runYtDlp(ytdlp, args, 20_000)
-          if (candidate.includes('.m3u8')) continue
-          streamUrl = candidate
-          needsExtract = true
-          break
-        } catch (error) {
-          lastError = error
-        }
-      }
-    }
-
+    // The winning spec tells us whether the file still carries video.
+    const needsExtract = Boolean(streamUrl && chosenMuxed)
     if (!streamUrl) throw lastError ?? new Error('no direct stream available')
 
     // Size and type come from curl for the same reason the download does:
@@ -411,4 +392,83 @@ async function fetchWhole(streamUrl: string, outPath: string, opts: FetchOptions
   const {size} = await fs.stat(outPath)
   opts.onProgress?.(size, size)
   return size
+}
+
+
+type RawStreamFormat = {
+  format_id?: string
+  protocol?: string
+  vcodec?: string
+  acodec?: string
+  height?: number
+  tbr?: number
+  ext?: string
+}
+
+/** Is this a plain file we can range-fetch (as opposed to a manifest)? */
+function isDirectProtocol(protocol: string | undefined): boolean {
+  if (!protocol) return false
+  return protocol === 'https' || protocol === 'http'
+}
+
+// `None` means "not reported", which is different from "none" (no track). Some
+// extractors (Twitter) leave codecs unset on their progressive formats, and
+// treating that as "no video" made every fast candidate look like a manifest.
+const hasAudio = (f: RawStreamFormat) => f.acodec !== 'none'
+const hasVideo = (f: RawStreamFormat) => f.vcodec !== 'none'
+const audioKnown = (f: RawStreamFormat) => Boolean(f.acodec && f.acodec !== 'none')
+const videoKnown = (f: RawStreamFormat) => Boolean(f.vcodec && f.vcodec !== 'none')
+
+/** Full stdout, for `--print` queries that return JSON rather than a URL. */
+function runYtDlpRaw(ytdlp: string, args: string[], timeoutMs: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(ytdlp, args, {signal: AbortSignal.timeout(timeoutMs)})
+    let out = ''
+    let err = ''
+    child.stdout.on('data', (chunk: Buffer) => (out += chunk))
+    child.stderr.on('data', (chunk: Buffer) => (err += chunk))
+    child.on('error', reject)
+    child.on('close', code => {
+      if (code === 0) resolve(out.trim())
+      else reject(new Error(err.trim().split('\n').at(-1) || `yt-dlp exited with ${code}`))
+    })
+  })
+}
+
+/**
+ * Choose the best format that can be downloaded as a single file.
+ *
+ * Returns undefined when the extractor only offers manifests — the caller then
+ * lets yt-dlp handle it, which is slower but correct for HLS/DASH.
+ */
+export function pickDirectFormat(
+  formats: RawStreamFormat[],
+  opts: {preferAudio: boolean; height?: number},
+): {spec: string; muxed: boolean} | undefined {
+  const direct = formats.filter(f => isDirectProtocol(f.protocol))
+
+  if (opts.preferAudio) {
+    // Audio-only first: a muxed file means downloading video we discard.
+    const audioOnly = direct
+      .filter(f => audioKnown(f) && !videoKnown(f))
+      .sort((a, b) => (b.tbr ?? 0) - (a.tbr ?? 0))[0]
+    if (audioOnly?.format_id) return {spec: audioOnly.format_id, muxed: false}
+
+    // No declared audio-only track: a complete file is still better than
+    // falling back to yt-dlp, and the caller strips the video with ffmpeg.
+    const whole = direct
+      .filter(f => (audioKnown(f) || videoKnown(f) || true) && f.format_id)
+      .sort((a, b) => (b.tbr ?? 0) - (a.tbr ?? 0))[0]
+    if (whole?.format_id) return {spec: whole.format_id, muxed: true}
+    return undefined
+  }
+
+  const limit = opts.height ?? 100_000
+  // Highest resolution progressive file at or below the requested height.
+  const candidates = direct
+    .filter(f => hasVideo(f) && (f.height ?? 0) > 0 && (f.height ?? 0) <= limit)
+    .sort((a, b) => (b.height ?? 0) - (a.height ?? 0) || (b.tbr ?? 0) - (a.tbr ?? 0))
+  const best = candidates[0]
+  if (best?.format_id) return {spec: best.format_id, muxed: hasAudio(best)}
+  return undefined
 }
