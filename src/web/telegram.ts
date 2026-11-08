@@ -12,7 +12,7 @@
  */
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import {sendLargeFileAsUser, userUploadConfigured} from './large-file.js'
+import {storageConfigured, uploadToStorage, userUploadConfigured} from './large-file.js'
 
 const API = (token: string, method: string) => `https://api.telegram.org/bot${token}/${method}`
 
@@ -176,22 +176,53 @@ async function handleMessage(update: Update, deps: BotDeps): Promise<void> {
   // The bot uploads directly while the file fits in its 50MB budget.
   if (botLimit && (await sendFile(chatId, job.filepath, filename, caption).catch(() => false))) return
 
-  // Over the limit: the Bot API cannot upload it, and re-uploading through a
-  // user account would move the same bytes twice. Instead the user sends the
-  // file *to the bot* from their own client (which is what a user account is
-  // for anyway), and the bot copies that message back — a copy, not an upload.
+  // Over the Bot API limit. The user account can upload up to 2GB, so it parks
+  // the file in a private channel and the bot copies it out of there — one
+  // upload, then a copy, instead of pushing the same bytes twice.
+  if (userUploadConfigured() && storageConfigured()) {
+    await sendMessage(chatId, `Large file (${formatBytes(size)}) — uploading from the user account…`)
+    const stored = await uploadToStorage(job.filepath, caption).catch(error => {
+      console.error('[telegram] storage upload failed:', (error as Error).message)
+      return undefined
+    })
+    if (stored) {
+      const delivered = await copyStoredFile(chatId, stored.chatId, stored.messageId).catch(() => false)
+      if (delivered) return
+    }
+  }
+
   if (userUploadConfigured()) {
+    // Storage channel not configured, or the copy failed: ask the user to send
+    // the file in, which the bot can copy back without any upload.
     await sendMessage(
       chatId,
-      `Large file (${formatBytes(size)}) — Telegram bots cannot send over 50MB.\n\n` +
-        `Send the file to me as a document, and I will copy it back to you instantly.\n` +
-        `Grab it here: ${publicUrl ?? ''}/api/jobs/${jobId}/file`,
+      `Could not send ${formatBytes(size)} as a document.\n\n` +
+        `Send the file to me and I will copy it back instantly.\n` +
+        `Or grab it here: ${publicUrl ?? ''}/api/jobs/${jobId}/file`,
     )
     return
   }
 
   // Nothing could deliver the file: hand over the link rather than nothing.
   await sendMessage(chatId, `${title}\nCould not send the file (${formatBytes(size)}), but it is here: ${publicUrl ?? ''}/api/jobs/${jobId}/file`)
+}
+
+/**
+ * Copy a message out of the storage channel into the requester's chat.
+ * `from_chat_id` accepts the channel's numeric id or @username.
+ */
+async function copyStoredFile(chatId: number, fromChat: string, messageId: number): Promise<boolean> {
+  try {
+    await call('copyMessage', {
+      chat_id: chatId,
+      from_chat_id: fromChat,
+      message_id: messageId,
+    })
+    return true
+  } catch (error) {
+    console.error('[telegram] copy from storage failed:', (error as Error).message)
+    return false
+  }
 }
 
 /**

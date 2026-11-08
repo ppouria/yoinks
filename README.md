@@ -189,7 +189,14 @@ TELEGRAM_API_ID=12345 TELEGRAM_API_HASH=abc... npm run telegram:login
 TELEGRAM_API_ID=12345
 TELEGRAM_API_HASH=abc...
 TELEGRAM_USER_SESSION=1BVtsOK...
+TELEGRAM_STORAGE_CHAT=-1001234567890
 ```
+
+`TELEGRAM_STORAGE_CHAT` is a **private channel the account uploads into**, with
+the bot added as an admin. The upload happens once, from the user account; the
+bot then copies the message out of that channel to the requester. Copying an
+existing Telegram message has no size limit, so a 2GB file reaches the user
+without a second upload.
 
 That session string is a **full login to the account** — anyone holding it can
 read and send as that user. Keep it in `.env` only (it is gitignored). Without

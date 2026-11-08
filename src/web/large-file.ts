@@ -79,33 +79,51 @@ async function getClient(): Promise<InstanceType<TeleprotoModule['TelegramClient
 }
 
 /**
- * Send a file from the user account into `chatId`.
- * Returns the sent message's id, or undefined when it could not be sent.
+ * Where the user account parks files: a private channel the bot also belongs to.
+ *
+ * The upload happens once, from the user account (2GB limit), into this channel.
+ * The bot then copies the message out of it — copying an existing Telegram
+ * message has no size limit, so a 2GB file reaches the requester without a
+ * second byte of upload.
  */
-export async function sendLargeFileAsUser(
-  chatId: number,
+const STORAGE_CHAT = process.env.TELEGRAM_STORAGE_CHAT || ''
+
+export function storageConfigured(): boolean {
+  return Boolean(STORAGE_CHAT)
+}
+
+/**
+ * Upload a file from the user account into the storage channel.
+ * Returns the resulting message id, which the bot copies from.
+ */
+export async function uploadToStorage(
   filepath: string,
   caption: string,
-): Promise<number | undefined> {
-  if (!userUploadConfigured()) return undefined
+): Promise<{chatId: string; messageId: number} | undefined> {
+  if (!userUploadConfigured() || !STORAGE_CHAT) return undefined
 
   const stat = await fs.stat(filepath).catch(() => undefined)
-  if (!stat || stat.size > USER_UPLOAD_LIMIT_BYTES) return undefined
+  if (!stat) return undefined
+  if (stat.size > USER_UPLOAD_LIMIT_BYTES) {
+    throw new Error(`file is ${formatMb(stat.size)}, over the 2GB account limit`)
+  }
 
   const instance = await getClient()
-  const result = await instance.sendFile(
-    // The bot's chat id for a private chat *is* the user id, which MTProto can
-    // resolve directly.
-    chatId as unknown as import('teleproto').Api.User,
-    {
-      file: filepath,
-      forceDocument: true,
-      caption,
-      // Uploading resumes on its own; this just keeps big files moving.
-      workers: 4,
-    },
-  )
-  return result?.id
+  // Resolve the channel entity once; teleproto accepts the id/username directly.
+  const entity = await instance.getInputEntity(STORAGE_CHAT)
+  const result = await instance.sendFile(entity, {
+    file: filepath,
+    forceDocument: true,
+    caption,
+    // A few parallel connections keep large uploads from stalling.
+    workers: 4,
+  })
+  if (!result?.id) throw new Error('upload produced no message id')
+  return {chatId: STORAGE_CHAT, messageId: result.id}
+}
+
+function formatMb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 /** Close the MTProto connection on shutdown. */
