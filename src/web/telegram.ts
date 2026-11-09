@@ -19,6 +19,12 @@ const API = (token: string, method: string) => `https://api.telegram.org/bot${to
 export type BotDeps = {
   /** Resolve a link and start a job; returns the job id and what it will be. */
   startJob: (url: string) => Promise<{jobId: string; title: string; isAudio: boolean}>
+  /**
+   * Delete a job's files once they have reached the user. Telegram keeps its own
+   * copy, so the server copy is dead weight — and keeping it is what bloated the
+   * panel's backups.
+   */
+  releaseJob?: (jobId: string) => Promise<void>
   /** Poll a job until it finishes. */
   waitForJob: (jobId: string, timeoutMs: number) => Promise<{
     status: string
@@ -174,7 +180,10 @@ async function handleMessage(update: Update, deps: BotDeps): Promise<void> {
   const botLimit = size <= MAX_UPLOAD_BYTES
 
   // The bot uploads directly while the file fits in its 50MB budget.
-  if (botLimit && (await sendFile(chatId, job.filepath, filename, caption).catch(() => false))) return
+  if (botLimit && (await sendFile(chatId, job.filepath, filename, caption).catch(() => false))) {
+    await deps.releaseJob?.(jobId).catch(() => {})
+    return
+  }
 
   // Over the Bot API limit. The user account can upload up to 2GB, so it parks
   // the file in a private channel and the bot copies it out of there — one
@@ -187,7 +196,12 @@ async function handleMessage(update: Update, deps: BotDeps): Promise<void> {
     })
     if (stored) {
       const delivered = await copyStoredFile(chatId, stored.chatId, stored.messageId).catch(() => false)
-      if (delivered) return
+      if (delivered) {
+        // The bytes now live in Telegram (the storage channel); nothing on this
+        // server needs to keep them.
+        await deps.releaseJob?.(jobId).catch(() => {})
+        return
+      }
     }
   }
 

@@ -627,14 +627,51 @@ function startJob(job: Job): void {
   })()
 }
 
+/**
+ * Delete expired downloads.
+ *
+ * This used to walk the in-memory job map, which meant anything on disk from a
+ * previous process was never looked at again: a restart orphaned every file
+ * forever (2.4GB had accumulated that way). The sweep is now driven by the
+ * directory itself, so a restart cannot leave files behind.
+ *
+ * A directory is removed when:
+ *   - its job expired, or
+ *   - it has no matching job in memory (an orphan from an earlier run), or
+ *   - it is simply older than the maximum retention window.
+ */
 async function reapExpired(): Promise<void> {
   const now = Date.now()
-  for (const [id, job] of jobs) {
-    if (job.status === 'done' && job.expiresAt && job.expiresAt < now) {
-      await fs.rm(path.join(WORK_DIR, id), {recursive: true, force: true})
-      jobs.delete(id)
-    } else if (job.status === 'error' || job.status === 'cancelled') {
-      if (now - job.createdAt > 3600_000) jobs.delete(id)
+  let entries: string[]
+  try {
+    entries = await fs.readdir(WORK_DIR)
+  } catch {
+    return
+  }
+
+  for (const entry of entries) {
+    if (entry === '.tmp') continue
+    const full = path.join(WORK_DIR, entry)
+    const job = jobs.get(entry)
+
+    if (job) {
+      const expired = job.status === 'done' && job.expiresAt && job.expiresAt < now
+      const stale = (job.status === 'error' || job.status === 'cancelled') && now - job.createdAt > 3600_000
+      if (expired || stale) {
+        await fs.rm(full, {recursive: true, force: true})
+        jobs.delete(entry)
+      }
+      continue
+    }
+
+    // No job in memory: an orphan from a previous process (or a job cancelled
+    // while the process was down). Judge it by the directory's own age.
+    const stat = await fs.stat(full).catch(() => undefined)
+    if (!stat) continue
+    const age = now - stat.mtimeMs
+    if (age > MAX_RETENTION_HOURS * 3600_000) {
+      await fs.rm(full, {recursive: true, force: true})
+      console.log(`reaped orphan ${entry} (${Math.round(age / 3600_000)}h old)`)
     }
   }
 }
@@ -1248,6 +1285,15 @@ async function main(): Promise<void> {
             deezerTrackId: (probe as {deezerTrackId?: string}).deezerTrackId,
           })
           return {jobId: job.id, title: job.title, isAudio}
+        },
+        releaseJob: async (jobId: string) => {
+          const job = jobs.get(jobId)
+          if (!job || job.status !== 'done') return
+          await fs.rm(path.join(WORK_DIR, jobId), {recursive: true, force: true})
+          job.filepath = undefined
+          job.status = 'cancelled'
+          jobs.delete(jobId)
+          console.log(`released ${jobId} after Telegram delivery`)
         },
         waitForJob: async (jobId: string, timeoutMs: number) => {
           const deadline = Date.now() + timeoutMs

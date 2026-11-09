@@ -386,7 +386,7 @@ export made on a different IP can make the site flag you for a re-login.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `HOST` / `PORT` | `127.0.0.1` / `3000` | listen address |
-| `YOINKS_WORK_DIR` | `./downloads` | where finished/in-progress files live |
+| `YOINKS_WORK_DIR` | `./downloads` | where finished/in-progress files live — put this **outside** any panel/app directory whose backups you care about |
 | `YOINKS_DIR_BUDGET_BYTES` | 8 GiB | refuse new downloads past this |
 | `YOINKS_RETENTION_HOURS` | 4 | default lifetime of a finished file |
 | `YOINKS_MAX_RETENTION_HOURS` | 168 | hard ceiling (1 week) |
